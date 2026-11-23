@@ -20,6 +20,7 @@ alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_P
 
 # Initial manual technical quality control
 [qc]
+channels = ["Resp-Lungs", "Resp-Diaphragm", "SpO2"]  # Channels displayed and assessed in manual QC, in this order; other native channels remain stored.
 open_gui = true  # Open the manual QC editor before conditioning; false adds no new manual review evidence.
 window_length = 600.0  # Initial visible window length, expressed in window_unit.
 window_unit = "seconds"  # seconds | samples; 600 samples at 200 Hz is 3 seconds.
@@ -36,7 +37,7 @@ max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing 
 # Signal conditioning eligibility
 [preprocessing]
 enabled = true  # Enable configured conditioning within finite, reviewed, non-artifact runs on usable channels.
-channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Channels eligible for conditioning; other channels pass through unchanged.
+channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts eligible for detrending/smoothing; SpO2 has its own QC-aware path; ECG/BP are pass-through TODOs.
 
 # Smoothing of the respiratory extraction view
 [preprocessing.smoothing]
@@ -50,6 +51,12 @@ polyorder = 3  # Savitzky-Golay polynomial degree; must be nonnegative and small
 [preprocessing.detrend]
 method = "none"  # none | moving_detrend; no hpfilter; none avoids repeating external DeTr_Norm preprocessing.
 window_sec = 60.0  # Moving-detrend window in seconds (MATLAB default); effective odd sample length is recorded.
+
+# Optional shared resampling after native-grid signal conditioning
+[preprocessing.resampling]
+resample_freq = 0.0  # Target sampling frequency in Hz for all six derived channels; 0 keeps the native grid.
+filter_half_width = 10  # FIR half-length multiplier of max(up, down); 10 matches SciPy's standard design.
+kaiser_beta = 5.0  # Kaiser window parameter for the anti-alias FIR; SciPy's default is 5.0.
 
 # Technical artifact handling
 [preprocessing.artifacts]

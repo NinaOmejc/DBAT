@@ -54,6 +54,26 @@ def verify_saved_result(path, result):
             "derived/respiratory_view": result.respiratory_view,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }
+        if result.resampled is not None:
+            resampled = result.resampled
+            if handle["resampled"].attrs["fs_hz"] != resampled["fs_hz"]:
+                raise ValueError("Resampled sampling rate changed during saving")
+            expected_arrays.update({
+                f"resampled/{name}": resampled[name]
+                for name in ("time_sec", "conditioned", "respiratory_view")
+            })
+            expected_arrays.update({
+                f"resampled/masks/{name}": mask for name, mask in resampled["masks"].items()
+            })
+            n_samples = resampled["conditioned"].shape[0]
+            if (
+                resampled["conditioned"].shape != (n_samples, len(recording.channels))
+                or resampled["respiratory_view"].shape != resampled["conditioned"].shape
+                or not np.array_equal(resampled["time_sec"], np.arange(n_samples) / resampled["fs_hz"])
+            ):
+                raise ValueError("Resampled channels do not share the declared zero-based time grid")
+        elif "resampled" in handle:
+            raise ValueError("Unexpected resampled data when resampling was disabled")
         for name, expected in expected_arrays.items():
             saved = handle[name][:]
             if (
@@ -83,7 +103,7 @@ def verify_saved_result(path, result):
                     "source samples unchanged",
                     "native time grid",
                     "channel order/fs",
-                    "derived arrays and boolean masks",
+                    "native and optional resampled derived arrays, boolean masks and grids",
                     "QC identity/bounds/provenance",
                     "HDF5/JSON agreement",
                 ],
@@ -138,6 +158,8 @@ def check_recording(config, subject, measurement):
         f"QC: {qc['review_status']} | {len(qc['artifacts'])} original artifact intervals (union durations below)"
     )
     for name, info in summary["channels"].items():
+        if not info["qc_selected"]:
+            continue
         logger.debug(
             f"  {name}: {info['rating']}; reviewed={info['reviewed_fraction']:.1%}; "
             f"artifacts={info['artifact_interval_count']} / {info['artifact_duration_sec']:g} s; "
@@ -145,6 +167,7 @@ def check_recording(config, subject, measurement):
             f"supported={info['respiratory_support']}"
         )
     logger.debug(f"Smoothing: {result.provenance['smoothing']} | Detrend: {result.provenance['detrend']}")
+    logger.debug(f"Resampling: {result.provenance['resampling']}")
     if qc["review_status"] == "not_reviewed":
         logger.debug(
             "No inspected QC evidence: selected conditioning is deferred; valid samples remain zero."

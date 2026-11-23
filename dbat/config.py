@@ -91,8 +91,8 @@ def _validate(config, directory):
     if len(input_config["channels"]) != 6 or set(input_config["channels"]) != set(CHANNELS):
         raise ValueError(f"input.channels must list each of these six names once: {CHANNELS}")
     selected = preprocessing["channels"]
-    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(CHANNELS):
-        raise ValueError("preprocessing.channels must contain unique input channel names")
+    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(BELTS):
+        raise ValueError("preprocessing.channels must contain unique respiratory belt channel names")
     for name in ("filename_pattern", "alternate_filename_pattern"):
         pattern = input_config[name]
         if not pattern and name == "alternate_filename_pattern":
@@ -127,6 +127,14 @@ def _validate(config, directory):
         parent = parent.parent
     if not parent.is_dir():
         raise ValueError(f"Output path has a file as an ancestor: {parent}")
+    qc_channels = qc["channels"]
+    if (
+        not isinstance(qc_channels, list)
+        or not qc_channels
+        or any(not isinstance(name, str) or name not in input_config["channels"] for name in qc_channels)
+        or len(set(qc_channels)) != len(qc_channels)
+    ):
+        raise ValueError("qc.channels must be a nonempty list of unique input channel names")
     window_samples(qc["window_length"], qc["window_unit"], fs_hz)
     if qc["artifact_scope"] not in {"both_belts", "selected_channel"}:
         raise ValueError("qc.artifact_scope must be both_belts or selected_channel")
@@ -177,6 +185,20 @@ def _validate(config, directory):
         )
     if window_samples(detrend["window_sec"], "seconds", fs_hz) < 3:
         raise ValueError("detrend.window_sec must resolve to at least three samples")
+    resampling = preprocessing["resampling"]
+    frequency = resampling["resample_freq"]
+    if (
+        isinstance(frequency, bool)
+        or not isinstance(frequency, (int, float))
+        or not math.isfinite(frequency)
+        or frequency < 0
+    ):
+        raise ValueError("resampling.resample_freq must be finite and nonnegative (Hz); 0 disables it")
+    if type(resampling["filter_half_width"]) is not int or resampling["filter_half_width"] < 1:
+        raise ValueError("resampling.filter_half_width must be a positive integer")
+    beta = resampling["kaiser_beta"]
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(beta) or beta < 0:
+        raise ValueError("resampling.kaiser_beta must be finite and nonnegative")
     if preprocessing["artifacts"]["automatic_detection"] is not False:
         raise ValueError("Automatic artifact detection is unvalidated and not implemented")
     if output["schema_version"] != "dbat_preprocessing_v1" or output["overwrite"] is not False:

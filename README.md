@@ -39,6 +39,7 @@ dbat/
     __init__.py
     annotations.py
     pipeline.py
+    resampling.py
     qc_gui.py
 ```
 
@@ -126,7 +127,9 @@ install packages; exact runtime versions are saved with each result.
 
 ## Manual QC GUI
 
-- All six channels share native time. Slider, Previous/Next and zoom buttons move
+- `qc.channels` defaults to `["Resp-Lungs", "Resp-Diaphragm", "SpO2"]`, in that
+  display order. Change this list to review other channels. All six native channels
+  remain stored on their original shared time grid. Slider, Previous/Next and zoom buttons move
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
   200 Hz; `600` seconds is **120000 samples**. Drawing alone may be thinned.
 - Enter a reviewer. Choose a channel and explicitly assign `usable`, `weak`, or
@@ -138,8 +141,8 @@ install packages; exact runtime versions are saved with each result.
   redraw to correct bounds. Removed intervals remain in the accepted edit history.
   Overlapping original annotations are retained; masks union them without double
   counting duration. A physiological sigh is not a technical artifact.
-- **Confirm visible (all)** explicitly records inspected coverage on all six plots
-  (green shading). Navigation alone records no inspection. A usable recording-level
+- **Confirm visible** explicitly records inspected coverage on the configured plots
+  (green shading); hidden channels receive no new review evidence. Navigation alone records no inspection. A usable recording-level
   rating alone does not establish locally artifact-free samples. Inspect all plots
   before confirming. Repeat through the recording for full coverage.
 - **Belts: shared/independent** switches amplitude scaling. Other channels retain
@@ -172,7 +175,14 @@ non-artifact runs on channels explicitly rated **usable**. Weak/unassessed chann
 remain uncertain; unavailable channels are excluded. With `qc.open_gui = false` and no prior QC, there are
 zero eligible samples and selected smoothing/detrending is deferred. This is a useful
 import/storage check, not a completed preprocessing review. Use `qc.annotation_files` to reuse
-accepted evidence without a GUI. Unselected channels pass through unchanged.
+accepted evidence without a GUI. Eligibility also requires selection in `qc.channels`;
+previous annotations on other channels are preserved without approving them for this run.
+
+`preprocess_belt` applies the configured belt detrending and respiratory smoothing.
+`preprocess_spo2` masks nonfinite or QC-ineligible values, preserving the supplied
+SpO2 scale without belt filtering or guessed saturation thresholds. `preprocess_ecg`
+and `preprocess_bp` are explicit pass-through TODOs for future signal-specific work.
+Their native views remain unchanged; common resampling still includes them.
 
 Moving means shrink at run endpoints; SG uses `mode='interp'`. Derived edge values
 may be displayed but full-window margins are excluded from accepted support. Runs
@@ -181,6 +191,33 @@ accumulates the respective guards. No filter crosses a manual artifact, missing
 value, unreviewed gap or channel-quality exclusion. NaNs in unsupported **derived**
 views never replace underlying supplied samples. These are conservative analysis
 support rules, not clinical validation or a MATLAB numerical-equivalence claim.
+
+## Optional shared resampling
+
+```toml
+[preprocessing.resampling]
+resample_freq = 0.0  # 0 disables resampling; e.g. 100.0 requests 100 Hz for all six channels.
+filter_half_width = 10  # Standard SciPy FIR half-length multiplier.
+kaiser_beta = 5.0  # Standard SciPy Kaiser window parameter.
+```
+
+TOML has no null value, so use **0** to retain the native grid. Resampling uses
+[SciPy `resample_poly`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.resample_poly.html)
+with a symmetric anti-alias FIR designed by
+[SciPy `firwin`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html).
+No new dependency is needed. A reduced integer up/down ratio defines one zero-based
+time grid for all six derived channels. Unsupported rate ratios raise an error.
+A target equal to the native rate also keeps the native grid without filtering.
+
+Signal-specific conditioning runs first at the native rate, preserving MATLAB's
+50-sample smoothing default at 200 Hz. Shared resampling then applies independently
+of the belt-conditioning `enabled` switch. Original samples, native derived views,
+QC intervals and native masks stay intact; resampled views are saved separately.
+Conservative full-FIR support excludes padding and any artifact, missing or unsupported
+input contribution. Those derived outputs become NaN. Quality-valid resampled samples
+additionally require reviewed, usable support throughout the footprint. Upsampling
+adds no new quality evidence or information. This filter is general resampling support,
+not implemented ECG/BP-specific conditioning.
 
 ## Outputs and manual verification
 
@@ -196,16 +233,19 @@ A failure during writing leaves a `.partial` directory rather than a published r
 - `/time_sec`, `/channels`, and fs/axis/interval-convention attributes.
 - `/derived/conditioned`: optional detrending, without respiratory smoothing.
 - `/derived/respiratory_view`: separate configured extraction-view smoothing.
-- `/masks/{finite,artifact,reviewed,uncertain,eligible,conditioning_support,respiratory_support,conditioned_valid,valid}`:
+- `/masks/{finite,artifact,reviewed,uncertain,quality_selected,eligible,conditioning_support,respiratory_support,conditioned_valid,valid}`:
   independent native-grid booleans. Support means numerical window support;
   `valid` additionally requires manual evidence and usable quality. Unknown is not
   a negative artifact decision. For pass-through channels support is finite-only.
+- Optional `/resampled/{time_sec,conditioned,respiratory_view}` and `/resampled/masks/*`:
+  all six derived channels on the shared target grid, with a separate `fs_hz`
+  attribute. Native QC intervals remain indexed against `/source/samples`.
 - `/metadata_json`: identity/hash, channel mapping, source timestamp, effective
   configuration, QC, method versions, actual window lengths, counts and limitations.
 
 `summary.json` mirrors that metadata; optional `preview.png` shows the configured
 viewport. The checker reopens HDF5/JSON, checks exact samples (including NaNs), native
-time, channels/fs, derived arrays, masks, QC bounds/provenance and unchanged source
+time, channels/fs, native and optional resampled arrays/grids/masks, QC bounds/provenance and unchanged source
 SHA-256. It writes `validation.json` **only after these checks pass**. This validates
 serialization and invariants, not scientific accuracy or agreement with MATLAB.
 
@@ -218,6 +258,15 @@ saving. Moving-mean endpoint/interior arithmetic and all three conditioning meth
 were checked on real-data segments. Live desktop capture was unreliable, so full
 mouse-driven annotation, rating and Save workflows still need user inspection.
 No MATLAB execution/comparison or automated tests were run during that initial check.
+
+The channel-selection/resampling update was also checked on that real recording:
+`360002 × 6` at 200 Hz became `180001 × 6` at 100 Hz. Native and resampled arrays,
+time grids, masks and metadata passed the existing round-trip checker; the source
+checksum was unchanged. Disabled resampling retained the native grid, ECG/BP native
+views stayed unchanged and excluded from default QC, and no unreviewed sample became
+quality-valid. The actual three-channel editor was rendered, and a one-channel
+layout was constructed. This was a no-GUI processing check, without accepted QC;
+full interactive annotation and scientific validation remain for manual inspection.
 
 Inspect the most recent output after a successful run:
 

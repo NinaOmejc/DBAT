@@ -211,6 +211,7 @@ def result_metadata(result, config):
         "channels": {
             name: {
                 "rating": result.qc["channel_ratings"][name],
+                "qc_selected": name in config["qc"]["channels"],
                 "artifact_interval_count": sum(
                     name in interval["channels"] for interval in result.qc["artifacts"]
                 ),
@@ -256,6 +257,14 @@ def save_preprocessing_result(result, config):
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }.items():
             handle.create_dataset(name, data=values, compression="gzip", shuffle=True)
+        if result.resampled is not None:
+            group = handle.create_group("resampled")
+            group.attrs["fs_hz"] = result.resampled["fs_hz"]
+            group.attrs["array_axes"] = "samples,channels; same channel order as /channels"
+            for name in ("time_sec", "conditioned", "respiratory_view"):
+                group.create_dataset(name, data=result.resampled[name], compression="gzip", shuffle=True)
+            for name, mask in result.resampled["masks"].items():
+                group.create_dataset(f"masks/{name}", data=mask, compression="gzip", shuffle=True)
         handle.create_dataset(
             "metadata_json",
             data=json.dumps(metadata, ensure_ascii=False, allow_nan=False),
@@ -271,7 +280,7 @@ def save_preprocessing_result(result, config):
 
 
 def save_preview(result, config, path):
-    """Draw one configured viewport; display thinning never changes native arrays."""
+    """Preview selected QC channels; drawing never changes stored arrays."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -287,8 +296,10 @@ def save_preview(result, config, path):
     indices = np.arange(start, end, step)
     figure = Figure(figsize=(13, 10), layout="constrained")
     FigureCanvasAgg(figure)
-    axes = figure.subplots(len(recording.channels), 1, sharex=True)
-    for column, (axis, name) in enumerate(zip(axes, recording.channels, strict=True)):
+    channels = config["qc"]["channels"]
+    axes = figure.subplots(len(channels), 1, sharex=True, squeeze=False)[:, 0]
+    for axis, name in zip(axes, channels, strict=True):
+        column = recording.channels.index(name)
         axis.plot(
             recording.time_sec[indices],
             recording.samples[indices, column],
@@ -308,6 +319,17 @@ def save_preview(result, config, path):
             lw=0.8,
             label="Respiratory view",
         )
+        if result.resampled is not None:
+            resampled = result.resampled
+            first, last = np.searchsorted(
+                resampled["time_sec"], [start / recording.fs_hz, end / recording.fs_hz]
+            )
+            stride = max(1, int(np.ceil((last - first) / config["qc"]["max_plot_points"])))
+            selected = slice(first, last, stride)
+            axis.plot(
+                resampled["time_sec"][selected], resampled["respiratory_view"][selected, column],
+                lw=0.8, label=f"Resampled ({resampled['fs_hz']:g} Hz)",
+            )
         for interval in result.qc["artifacts"]:
             if (
                 name in interval["channels"]

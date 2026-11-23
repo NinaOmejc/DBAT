@@ -32,6 +32,9 @@ class ManualQCEditor:
 
         self.recording = recording
         self.settings = config["qc"]
+        self.channels = tuple(self.settings["channels"])
+        self.columns = tuple(recording.channels.index(name) for name in self.channels)
+        self.belt_channels = tuple(name for name in BELTS if name in self.channels)
         self.qc = (
             deepcopy(qc_annotations)
             if qc_annotations is not None
@@ -50,9 +53,10 @@ class ManualQCEditor:
         self.shared_scale = self.settings["shared_belt_scale"]
         self.syncing = False
         self.shading = []
-        self.figure, self.axes = plt.subplots(
-            len(recording.channels), 1, sharex=True, figsize=(14, 9)
+        self.figure, axes = plt.subplots(
+            len(self.channels), 1, sharex=True, figsize=(14, 9), squeeze=False
         )
+        self.axes = axes[:, 0]
         self.figure.subplots_adjust(left=0.09, right=0.74, top=0.92, bottom=0.24, hspace=0.12)
         self.figure.canvas.manager.set_window_title(f"DBAT initial QC — {recording.recording_id}")
         self.figure.suptitle(
@@ -71,21 +75,26 @@ class ManualQCEditor:
         )
         self.figure.text(0.79, 0.865, "Recording-level channel rating", fontsize=9)
         self.channel = RadioButtons(
-            self.figure.add_axes((0.79, 0.63, 0.19, 0.225)), recording.channels
+            self.figure.add_axes((0.79, 0.63, 0.19, 0.225)), self.channels
         )
         self.rating = RadioButtons(self.figure.add_axes((0.79, 0.455, 0.19, 0.15)), RATINGS)
         self.scope = RadioButtons(
             self.figure.add_axes((0.79, 0.335, 0.19, 0.095)),
             ("Both belts", "Dragged channel"),
-            active=0 if self.settings["artifact_scope"] == "both_belts" else 1,
+            active=0
+            if self.settings["artifact_scope"] == "both_belts" and len(self.belt_channels) == 2
+            else 1,
         )
         self.buttons = []  # Widgets must remain alive for their callbacks.
-        self._button((0.79, 0.27, 0.19, 0.04), "Confirm visible (all)", self._confirm_visible)
+        self._button((0.79, 0.27, 0.19, 0.04), "Confirm visible", self._confirm_visible)
         self.scale_button = self._button(
             (0.79, 0.21, 0.19, 0.04),
             "Belts: shared" if self.shared_scale else "Belts: independent",
             self._toggle_scale,
         )
+        if len(self.belt_channels) < 2:
+            self.scale_button.set_active(False)
+            self.scale_button.label.set_text("Belt scale: n/a")
         self._button((0.79, 0.125, 0.19, 0.05), "Save / Done", self._save)
         self._button((0.79, 0.055, 0.19, 0.05), "Cancel", self._cancel)
         self.slider = Slider(
@@ -120,9 +129,9 @@ class ManualQCEditor:
                 button=1,
                 props={"facecolor": "tab:red", "alpha": 0.2},
             )
-            for axis, name in zip(self.axes, recording.channels, strict=True)
+            for axis, name in zip(self.axes, self.channels, strict=True)
         ]
-        self._select_channel(recording.channels[0])
+        self._select_channel(self.channels[0])
         self._draw()
 
     def _button(self, rectangle, label, callback):
@@ -236,6 +245,9 @@ class ManualQCEditor:
                 "Both-belts mode: drag on a belt. Select Dragged channel to annotate another channel."
             )
             return
+        if self.scope.value_selected == "Both belts" and len(self.belt_channels) < 2:
+            self._message("Both-belts mode requires both belts to be displayed; select Dragged channel.")
+            return
         channels = BELTS if self.scope.value_selected == "Both belts" else (name,)
         start = max(self.start, math.floor(min(low, high) * self.recording.fs_hz + 1e-9))
         end = min(self.start + self.window, math.ceil(max(low, high) * self.recording.fs_hz - 1e-9))
@@ -252,7 +264,7 @@ class ManualQCEditor:
         reviewer = self._reviewer_name()
         if not reviewer:
             return
-        name = self.recording.channels[list(self.axes).index(event.inaxes)]
+        name = self.channels[list(self.axes).index(event.inaxes)]
         sample = math.floor(event.xdata * self.recording.fs_hz)
         for index in range(len(self.qc["artifacts"]) - 1, -1, -1):
             interval = self.qc["artifacts"][index]
@@ -273,14 +285,14 @@ class ManualQCEditor:
                 return
 
     def _confirm_visible(self, event):
-        """Explicitly confirm inspected coverage on all six displayed channels."""
+        """Explicitly confirm inspected coverage only on the displayed QC channels."""
         reviewer = self._reviewer_name()
         if reviewer:
             self.qc["reviewed_intervals"].append(
                 make_interval(
                     self.start,
                     self.start + self.window,
-                    self.recording.channels,
+                    self.channels,
                     self.recording.fs_hz,
                     reviewer,
                 )
@@ -293,21 +305,21 @@ class ManualQCEditor:
         step = max(1, math.ceil(self.window / self.settings["max_plot_points"]))
         indices = np.arange(self.start, end, step)
         limits = {}
-        for column, name in enumerate(self.recording.channels):
+        for name, column in zip(self.channels, self.columns, strict=True):
             values = self.recording.samples[self.start : end, column]
             finite = values[np.isfinite(values)]
             limits[name] = (
                 (float(finite.min()), float(finite.max())) if finite.size else (-1.0, 1.0)
             )
-        if self.shared_scale:
-            low = min(limits[name][0] for name in BELTS)
-            high = max(limits[name][1] for name in BELTS)
-            limits.update(dict.fromkeys(BELTS, (low, high)))
+        if self.shared_scale and len(self.belt_channels) == 2:
+            low = min(limits[name][0] for name in self.belt_channels)
+            high = max(limits[name][1] for name in self.belt_channels)
+            limits.update(dict.fromkeys(self.belt_channels, (low, high)))
         for patch in self.shading:
             patch.remove()
         self.shading.clear()
-        for column, (axis, name, line) in enumerate(
-            zip(self.axes, self.recording.channels, self.lines, strict=True)
+        for axis, name, column, line in zip(
+            self.axes, self.channels, self.columns, self.lines, strict=True
         ):
             line.set_data(self.recording.time_sec[indices], self.recording.samples[indices, column])
             low, high = limits[name]
@@ -345,6 +357,7 @@ class ManualQCEditor:
             return
         self.qc["reviewer"] = reviewer
         self.qc["gui_settings"] = {
+            "channels": list(self.channels),
             "window_samples": self.window,
             "window_unit": self.settings["window_unit"],
             "shared_belt_scale": self.shared_scale,
