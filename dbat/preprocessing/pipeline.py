@@ -8,6 +8,7 @@ from scipy.signal import savgol_filter
 
 from ..config import BELTS, window_samples
 from ..io.recording import Recording
+from ..logging import logger
 from .annotations import annotation_masks, continuous_runs, new_qc_annotations, recording_identity
 from .cleaning import clean_recording, preprocess_spo2 as preprocess_spo2
 from .polarity import apply_polarity, assess_relative_belt_polarity, saved_polarity_decision
@@ -34,6 +35,7 @@ def prepare_recording(recording, config):
     Returns corrected native data, automatic masks/events, a compatibility
     signature and diagnostics. No manual evidence or polarity flip is inferred.
     """
+    logger.info("  Automatic correction and optional polarity assessment for %s...", recording.recording_id)
     prepared = clean_recording(recording, config)
     reliable = (
         np.isfinite(prepared["corrected"])
@@ -43,6 +45,8 @@ def prepare_recording(recording, config):
         prepared["corrected"], recording.channels, recording.fs_hz, reliable,
         config["preprocessing"]["check_relative_belt_polarity"],
     )
+    logger.debug("Automatic cleaning: %s", prepared["provenance"]["channels"])
+    logger.debug("Relative polarity: %s", prepared["polarity"])
     return prepared
 
 
@@ -176,6 +180,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
         or list(recording.channels) != config["input"]["channels"]
     ):
         raise ValueError("Recording fs/channel mapping disagrees with configuration")
+    logger.info("  Preprocessing %s...", recording.recording_id)
     qc = qc_annotations if qc_annotations is not None else new_qc_annotations(recording)
     masks = annotation_masks(qc, recording)
     prepared = prepare_recording(recording, config) if prepared is None else prepared
@@ -293,4 +298,8 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     }
     result = PreprocessingResult(recording, corrected, conditioned, respiratory_view, masks, qc, provenance)
     result.resampled, provenance["resampling"] = resample_views(result, settings["resampling"])
+    logger.debug("Smoothing: %s | Detrend: %s", provenance["smoothing"], provenance["detrend"])
+    logger.debug("Resampling: %s", provenance["resampling"])
+    if qc["review_status"] == "not_reviewed":
+        logger.debug("No inspected QC evidence: selected conditioning is deferred; valid samples remain zero.")
     return result

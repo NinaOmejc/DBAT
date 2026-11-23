@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 
 from .. import __version__
+from ..logging import logger
 from ..preprocessing.annotations import (
     continuous_runs,
     recording_identity,
@@ -106,6 +107,8 @@ def load_dat_recording(config, dat_path=None, *, subject=None, measurement=None)
     fs_match = re.search(r"(?:^|_)fs(\d+(?:\.\d+)?)(?:_|$)", path.stem, re.IGNORECASE)
     if fs_match and float(fs_match.group(1)) != fs_hz:
         raise ValueError(f"Filename sample rate disagrees with configured input.fs_hz={fs_hz}")
+    logger.info("  Loading Sub%s_M%s...", subject, measurement)
+    logger.debug("Source: %s", path)
     before = path.stat()
     try:
         samples = np.loadtxt(path, dtype=np.float64, comments=None, ndmin=2)
@@ -125,7 +128,7 @@ def load_dat_recording(config, dat_path=None, *, subject=None, measurement=None)
     times = np.arange(samples.shape[0], dtype=np.float64) / fs_hz
     samples.setflags(write=False)
     times.setflags(write=False)
-    return Recording(
+    recording = Recording(
         samples,
         times,
         channels,
@@ -136,6 +139,11 @@ def load_dat_recording(config, dat_path=None, *, subject=None, measurement=None)
         checksum,
         datetime.fromtimestamp(after.st_mtime, timezone.utc).isoformat(),
     )
+    logger.debug(
+        "Loaded %s | shape=%s | fs=%g Hz | duration=%g s",
+        recording.recording_id, samples.shape, fs_hz, samples.shape[0] / fs_hz,
+    )
+    return recording
 
 
 def _output_root(recording, output_dir):
@@ -156,6 +164,7 @@ def save_qc_annotations(qc, recording, output_dir):
     validate_qc_annotations(qc, recording)
     if qc["accepted_at_utc"] is None:
         raise ValueError("Only explicitly accepted QC can be saved as a review")
+    logger.info("  Saving QC for %s...", recording.recording_id)
     folder = _output_root(recording, output_dir) / "qc"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{_version_name()}.json"
@@ -163,12 +172,15 @@ def save_qc_annotations(qc, recording, output_dir):
     with temporary.open("x", encoding="utf-8") as stream:
         json.dump(qc, stream, indent=2, ensure_ascii=False, allow_nan=False)
     temporary.rename(path)
+    logger.debug("Accepted QC saved: %s", path)
     return path
 
 
 def load_qc_annotations(path, recording):
     """Reload a DBAT QC JSON or summary JSON after exact source/grid validation."""
     path = Path(path).resolve(strict=True)
+    logger.info("  Loading saved QC for %s...", recording.recording_id)
+    logger.debug("QC source: %s", path)
     with path.open(encoding="utf-8") as stream:
         document = json.load(stream)
     qc = document["qc"] if document.get("schema_version") == "dbat_preprocessing_v1" else document
@@ -237,6 +249,7 @@ def save_preprocessing_result(result, config):
     """
     recording = result.recording
     validate_qc_annotations(result.qc, recording)
+    logger.info("  Saving preprocessing result for %s...", recording.recording_id)
     root = _output_root(recording, config["paths"]["output_dir"]) / "runs"
     root.mkdir(parents=True, exist_ok=True)
     version = _version_name()
@@ -278,6 +291,22 @@ def save_preprocessing_result(result, config):
         save_preview(result, config, temporary / "preview.png")
     destination = root / version
     temporary.rename(destination)
+    logger.debug(
+        "QC: %s | %s original artifact intervals (union durations below)",
+        result.qc["review_status"], len(result.qc["artifacts"]),
+    )
+    for name, info in metadata["channels"].items():
+        if not info["qc_selected"]:
+            continue
+        logger.debug(
+            "  %s: %s; reviewed=%.1f%%; artifacts=%s / %g s; valid=%s/%s (%.1f%%); supported=%s",
+            name, info["rating"], 100 * info["reviewed_fraction"],
+            info["artifact_interval_count"], info["artifact_duration_sec"],
+            info["valid"], recording.samples.shape[0], 100 * info["valid_fraction"],
+            info["respiratory_support"],
+        )
+    logger.debug("Output: %s", destination / filename)
+    logger.debug("Metadata: %s", destination / "summary.json")
     return destination / filename
 
 

@@ -9,6 +9,7 @@ from matplotlib.patches import Patch
 from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider, SpanSelector, TextBox
 
 from ..config import BELTS, window_samples
+from ..logging import logger
 from .annotations import (
     RATINGS,
     make_interval,
@@ -501,6 +502,9 @@ def run_qc_gui(recording, config, qc_annotations=None, prepared=None):
         raise RuntimeError(
             "Manual QC needs an interactive Matplotlib backend; on Windows set MPLBACKEND=TkAgg"
         )
+    logger.info("  Manual QC for %s...", recording.recording_id)
     editor = ManualQCEditor(recording, config, qc_annotations, prepared)
     plt.show(block=True)
+    if editor.result is None:
+        logger.info("Cancelled QC for %s; session edits discarded.", recording.recording_id)
     return editor.result

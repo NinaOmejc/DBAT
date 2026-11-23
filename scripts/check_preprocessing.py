@@ -8,8 +8,6 @@ Writes versioned HDF5/JSON results and optional previews, then checks each round
 
 import argparse
 import json
-import logging
-import sys
 from pathlib import Path
 
 import h5py
@@ -23,6 +21,7 @@ from dbat.io.recording import (
     save_qc_annotations,
     source_sha256,
 )
+from dbat.logging import configure_logging, logger
 from dbat.preprocessing.annotations import (
     new_qc_annotations,
     utc_now,
@@ -31,12 +30,12 @@ from dbat.preprocessing.annotations import (
 from dbat.preprocessing.pipeline import prepare_recording, preprocess_recording
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-logger = logging.getLogger("dbat")
 
 
 def verify_saved_result(path, result):
     """Reopen the real output; raise on lost samples, time, masks or metadata."""
     recording = result.recording
+    logger.info("  Verifying saved result for %s...", recording.recording_id)
     with (path.parent / "summary.json").open(encoding="utf-8") as stream:
         summary = json.load(stream)
     with h5py.File(path, "r") as handle:
@@ -125,6 +124,11 @@ def verify_saved_result(path, result):
             stream,
             indent=2,
         )
+    logger.debug(
+        "Round trip verified: %s | shape=%s | fs=%g Hz | duration=%g s",
+        recording.recording_id, recording.samples.shape, recording.fs_hz, summary["duration_sec"],
+    )
+    logger.debug("Validation: %s", path.parent / "validation.json")
     return summary
 
 
@@ -134,7 +138,6 @@ def check_recording(config, subject, measurement):
     Cancel returns None and leaves existing results and accepted QC untouched.
     All processing goes through the same DBAT package functions as a single run.
     """
-    logger.info("  Loading recording...")
     recording = load_dat_recording(
         config, config["input"]["dat_file"] or None, subject=subject, measurement=measurement
     )
@@ -144,62 +147,26 @@ def check_recording(config, subject, measurement):
         if qc_file
         else new_qc_annotations(recording, config["qc"]["reviewer"])
     )
-    logger.info("  Automatic correction and optional polarity assessment...")
     prepared = prepare_recording(recording, config)
-    logger.debug(f"Automatic cleaning: {prepared['provenance']['channels']}")
-    logger.debug(f"Relative polarity: {prepared['polarity']}")
     if config["qc"]["open_gui"]:
         from dbat.preprocessing.qc_gui import run_qc_gui
 
-        logger.info("  Manual QC...")
         qc = run_qc_gui(recording, config, qc, prepared=prepared)
         if qc is None:
-            logger.info(
-                f"Cancelled {recording.recording_id}: no new files saved; continuing to the next recording."
-            )
             return None
-        logger.info("  Saving QC...")
-        qc_path = save_qc_annotations(qc, recording, config["paths"]["output_dir"])
-        logger.debug(f"Accepted QC saved before conditioning: {qc_path}")
+        save_qc_annotations(qc, recording, config["paths"]["output_dir"])
 
-    logger.info("  Preprocessing...")
     result = preprocess_recording(recording, config, qc, prepared=prepared)
-    logger.info("  Saving and verifying result...")
     path = save_preprocessing_result(result, config)
 
-    summary = verify_saved_result(path, result)
-    logger.debug(
-        f"Round trip verified: {recording.recording_id} | shape={recording.samples.shape} | "
-        f"fs={recording.fs_hz:g} Hz | duration={summary['duration_sec']:g} s"
-    )
-    logger.debug(
-        f"QC: {qc['review_status']} | {len(qc['artifacts'])} original artifact intervals (union durations below)"
-    )
-    for name, info in summary["channels"].items():
-        if not info["qc_selected"]:
-            continue
-        logger.debug(
-            f"  {name}: {info['rating']}; reviewed={info['reviewed_fraction']:.1%}; "
-            f"artifacts={info['artifact_interval_count']} / {info['artifact_duration_sec']:g} s; "
-            f"valid={info['valid']}/{recording.samples.shape[0]} ({info['valid_fraction']:.1%}); "
-            f"supported={info['respiratory_support']}"
-        )
-    logger.debug(f"Smoothing: {result.provenance['smoothing']} | Detrend: {result.provenance['detrend']}")
-    logger.debug(f"Resampling: {result.provenance['resampling']}")
-    if qc["review_status"] == "not_reviewed":
-        logger.debug(
-            "No inspected QC evidence: selected conditioning is deferred; valid samples remain zero."
-        )
-    logger.debug(
-        f"Output: {path}\nMetadata/QA: {path.parent / 'summary.json'} | {path.parent / 'validation.json'}"
-    )
+    verify_saved_result(path, result)
     return path
 
 
 def main(config_file):
     """Run Phase 1 for the configured subject/measurement Cartesian product.
 
-    Configure all dbat console progress from run.verbosity.
+    Use project logging configured from run.verbosity.
 
     Parameters
     ----------
@@ -214,13 +181,7 @@ def main(config_file):
     """
     config = load_config(config_file)
     selection = config["run"]
-    levels = {0: logging.CRITICAL + 1, 1: logging.INFO, 2: logging.DEBUG}
-    logger.setLevel(levels[selection["verbosity"]])
-    logger.propagate = False
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
+    configure_logging(selection["verbosity"])
     excluded = {tuple(pair) for pair in selection["exclude_recordings"]}
     outputs = []
 

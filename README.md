@@ -32,6 +32,7 @@ their provenance retains the paths used at the time they were produced. The empt
 dbat/
   __init__.py
   config.py
+  logging.py
   io/
     __init__.py
     recording.py
@@ -104,7 +105,20 @@ its own versioned result and round-trip verification.
 **0** is silent, **1** (default) shows recording IDs and high-level steps, and
 **2** additionally shows round-trip details, channel/QC statistics, processing
 parameters and output paths. Saved results and verification run at every level.
-Package modules can use `logging.getLogger(__name__)` to inherit this setting.
+The shared logger and `configure_logging(verbosity)` live in `dbat/logging.py`.
+IO, preprocessing and GUI functions emit their own progress and diagnostics;
+the checker only adds batch progress and round-trip verification messages.
+For another script or notebook, configure logging once after loading the TOML:
+
+```python
+from dbat.logging import configure_logging
+
+configure_logging(config["run"]["verbosity"])
+```
+
+Repeated configuration updates the same console handler. It does not change
+Python's root logger. Other DBAT modules can import `logger` from `dbat.logging`,
+or use `logging.getLogger(__name__)` under the `dbat` namespace.
 
 Set **`qc.open_gui = true`** or **`false`** in TOML; no paired GUI command-line flags
 are needed. Reviewer, viewing window, preview saving and scientific methods are
