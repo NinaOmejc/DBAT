@@ -1,0 +1,49 @@
+# Paths relative to this file are resolved from this file's directory.
+[paths]
+input_dir = "D:/Projects/MAGMA/raw_data"
+output_dir = "D:/Experiments/DBAT/outputs"
+
+[input]
+fs_hz = 200.0
+# Explicit ASCII column order; DBAT never guesses or transposes columns.
+channels = ["ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm"]
+filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm.dat"
+alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm_Glue.dat"
+
+[qc]
+open_gui = true
+window_length = 600.0
+window_unit = "seconds"  # Or "samples"; 600 samples at 200 Hz is 3 s.
+shared_belt_scale = true
+artifact_scope = "both_belts"  # Or "selected_channel": drag on that channel's plot.
+reviewer = ""  # May also be entered in the GUI or with --reviewer.
+initial_rating = "unassessed"
+max_plot_points = 5000  # Drawing only; annotation indices stay on the native grid.
+
+[preprocessing]
+enabled = true
+channels = ["Resp-Lungs", "Resp-Diaphragm"]
+# Conditioning requires explicitly reviewed support AND a usable channel rating.
+# No automatic artifact detection, interpolation, normalization or polarity flip.
+
+[preprocessing.smoothing]
+method = "moving_mean"  # none | moving_mean | savitzky_golay
+window_sec = 0.25  # MATLAB default: round(0.25 * 200) = 50 samples.
+sg_window = 51.0  # Must resolve to an odd number of samples; never rounded to odd.
+sg_window_unit = "samples"  # seconds also supported, e.g. 0.255 at 200 Hz.
+polyorder = 3
+
+[preprocessing.detrend]
+method = "none"  # none | moving_detrend; hpfilter intentionally not implemented.
+window_sec = 60.0  # MATLAB get_config_defaults.m; effective odd window recorded.
+
+[preprocessing.artifacts]
+automatic_detection = false  # No guessed technical-artifact thresholds.
+
+[output]
+schema_version = "dbat_preprocessing_v1"
+overwrite = false  # Only immutable versioned saves are supported.
+filename = "{recording_id}_preprocessing.h5"
+save_preview = true
+preview_start_sec = 0.0
+preview_duration_sec = 60.0

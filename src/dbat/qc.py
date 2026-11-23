@@ -1,0 +1,151 @@
+"""Native-grid technical QC annotations, independent of the GUI and conditioning."""
+
+import math
+from datetime import datetime, timezone
+from uuid import uuid4
+
+import numpy as np
+
+QC_SCHEMA = "dbat_qc_v1"
+RATINGS = ("unassessed", "usable", "weak", "unavailable")
+
+
+def utc_now():
+    """Return an explicit UTC ISO timestamp for annotation provenance."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def recording_identity(recording):
+    """Return the identity needed to reject QC from a different source/grid."""
+    return {
+        "recording_id": recording.recording_id,
+        "subject": recording.subject,
+        "measurement": recording.measurement,
+        "source_sha256": recording.source_sha256,
+        "n_samples": recording.samples.shape[0],
+        "fs_hz": recording.fs_hz,
+        "channels": list(recording.channels),
+    }
+
+
+def new_qc_annotations(recording, reviewer=""):
+    """Create an unreviewed record; an empty artifact list is not clean evidence."""
+    return {
+        "schema_version": QC_SCHEMA,
+        "identity": recording_identity(recording),
+        "source": "dbat_manual_qc",
+        "reviewer": reviewer,
+        "created_at_utc": utc_now(),
+        "accepted_at_utc": None,
+        "review_status": "not_reviewed",
+        "parent_qc_file": None,
+        "channel_ratings": dict.fromkeys(recording.channels, "unassessed"),
+        "rating_provenance": {},
+        "artifacts": [],
+        "reviewed_intervals": [],
+        "edit_history": [],
+    }
+
+
+def make_interval(start, end, channels, fs_hz, reviewer):
+    """Describe one zero-based half-open [start, end) annotation in samples/s."""
+    return {
+        "id": uuid4().hex,
+        "schema_version": QC_SCHEMA,
+        "start_sample": int(start),
+        "end_sample": int(end),
+        "start_sec": start / fs_hz,
+        "end_sec": end / fs_hz,
+        "channels": list(channels),
+        "reviewer": reviewer,
+        "created_at_utc": utc_now(),
+        "source": "dbat_manual_qc",
+    }
+
+
+def review_status(qc):
+    """Describe accepted review evidence, including partial clean inspection."""
+    if not qc["accepted_at_utc"]:
+        return "not_reviewed"
+    if qc["artifacts"]:
+        return "reviewed_with_artifacts"
+    return "reviewed_clean" if qc["reviewed_intervals"] else "not_reviewed"
+
+
+def validate_qc_annotations(qc, recording):
+    """Validate native identity, interval coordinates, ratings and provenance.
+
+    No intervals are clipped, silently repaired, or promoted to clean evidence.
+    Channel rating and inspected coverage remain independent decisions.
+    """
+    if qc.get("schema_version") != QC_SCHEMA or qc.get("identity") != recording_identity(recording):
+        raise ValueError(
+            "QC schema or source identity/hash/fs/channel grid does not match this recording"
+        )
+    ratings = qc.get("channel_ratings", {})
+    if set(ratings) != set(recording.channels) or any(
+        value not in RATINGS for value in ratings.values()
+    ):
+        raise ValueError("QC must contain one supported rating per input channel")
+    has_evidence = any(value != "unassessed" for value in ratings.values())
+    for name, rating in ratings.items():
+        if rating != "unassessed":
+            provenance = qc.get("rating_provenance", {}).get(name, {})
+            if not provenance.get("reviewer", "").strip() or not provenance.get("created_at_utc"):
+                raise ValueError(f"QC rating for {name} lacks reviewer/time provenance")
+    identifiers = set()
+    for field in ("artifacts", "reviewed_intervals"):
+        for interval in qc.get(field, []):
+            start, end = interval["start_sample"], interval["end_sample"]
+            if (
+                type(start) is not int
+                or type(end) is not int
+                or not 0 <= start < end <= recording.samples.shape[0]
+            ):
+                raise ValueError(
+                    f"QC {field} requires integer [start, end) bounds inside the recording"
+                )
+            channels = interval["channels"]
+            if (
+                not channels
+                or len(set(channels)) != len(channels)
+                or not set(channels) <= set(recording.channels)
+            ):
+                raise ValueError(f"QC {field} refers to missing or duplicate channels")
+            for key, expected in (
+                ("start_sec", start / recording.fs_hz),
+                ("end_sec", end / recording.fs_hz),
+            ):
+                if not math.isclose(interval[key], expected, rel_tol=0, abs_tol=1e-9):
+                    raise ValueError("QC seconds disagree with its native sample coordinates")
+            if interval.get("schema_version") != QC_SCHEMA or not interval.get("source"):
+                raise ValueError("QC interval lacks a supported schema/source")
+            if not interval.get("reviewer", "").strip() or not interval.get("created_at_utc"):
+                raise ValueError("QC interval lacks reviewer/time provenance")
+            if not interval.get("id") or interval["id"] in identifiers:
+                raise ValueError("QC interval IDs must be nonempty and unique")
+            identifiers.add(interval["id"])
+            has_evidence = True
+    if has_evidence and (not qc.get("accepted_at_utc") or not qc.get("reviewer", "").strip()):
+        raise ValueError("Manual QC evidence requires an accepted review and a reviewer")
+    if qc.get("review_status") != review_status(qc):
+        raise ValueError("QC review_status disagrees with its accepted interval evidence")
+
+
+def annotation_masks(qc, recording):
+    """Union original intervals into independent (samples, channels) boolean masks.
+
+    Original overlapping/touching annotations and their provenance stay intact.
+    Confirmed artifacts count as inspected evidence but never as clean support.
+    """
+    validate_qc_annotations(qc, recording)
+    masks = {key: np.zeros(recording.samples.shape, dtype=bool) for key in ("artifact", "reviewed")}
+    for field, key in (("reviewed_intervals", "reviewed"), ("artifacts", "artifact")):
+        for interval in qc[field]:
+            for name in interval["channels"]:
+                column = recording.channels.index(name)
+                start, end = interval["start_sample"], interval["end_sample"]
+                masks[key][start:end, column] = True
+                if key == "artifact":
+                    masks["reviewed"][start:end, column] = True
+    return masks
