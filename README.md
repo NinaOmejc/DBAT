@@ -68,6 +68,14 @@ files are available immediately; reinstall after changing dependency/package met
 
 ## Run a real recording now
 
+For one-click development in PyCharm, open `scripts/check_preprocessing.py`,
+edit `example_args` in the `if __name__ == "__main__":` block at the bottom,
+and click Run or Debug with no script parameters. The example selects Sub1/M1,
+opens the QC GUI, and sets the reviewer to Nina. Processing settings still
+come from the TOML configuration. Any supplied command-line arguments replace
+the example entirely. You can also call `main(["--subject", "1",
+"--measurement", "1", "--gui"])` from another Python script.
+
 The checker uses normal package imports. Install DBAT as above before running it.
 
 ```powershell

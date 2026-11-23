@@ -2,12 +2,14 @@
 
 Run from any directory, e.g.:
     python scripts/check_preprocessing.py --subject 33 --measurement 1 --gui
+With no arguments, uses the editable example in the __main__ block.
 Writes a versioned HDF5/JSON result and optional preview; validates its round trip.
 No synthetic recordings, automated test suite or separate preprocessing pipeline.
 """
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import h5py
@@ -91,8 +93,14 @@ def verify_saved_result(path, result):
     return summary
 
 
-def main():
-    """Load, optionally review, condition, save and reopen one supplied recording."""
+def main(argv=None):
+    """Check one recording using an argument list, or command-line arguments.
+
+    Parameters
+    ----------
+    argv : list[str], optional
+        CLI-style arguments; None reads the process command line.
+    """
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -114,7 +122,7 @@ def main():
     parser.add_argument(
         "--no-preview", action="store_true", help="Skip the optional static inspection image"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     overrides = {"paths": {}, "qc": {}, "output": {}}
     if args.output_dir is not None:
         overrides["paths"]["output_dir"] = str(args.output_dir.resolve())
@@ -172,4 +180,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Edit this example, then click Run/Debug without script parameters.
+    example_args = [
+        "--subject", "1",
+        "--measurement", "1",
+        "--gui",
+        "--reviewer", "Nina",
+    ]
+    # Explicit command-line arguments replace the example.
+    main(sys.argv[1:] or example_args)
