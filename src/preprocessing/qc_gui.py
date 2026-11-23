@@ -7,8 +7,8 @@ import matplotlib
 import numpy as np
 from matplotlib.widgets import Button, RadioButtons, Slider, SpanSelector, TextBox
 
-from .config import BELTS, window_samples
-from .qc import (
+from ..config import BELTS, window_samples
+from .annotations import (
     RATINGS,
     make_interval,
     new_qc_annotations,

@@ -7,6 +7,7 @@ No synthetic recordings, automated test suite or separate preprocessing pipeline
 """
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -15,18 +16,26 @@ import h5py
 import numpy as np
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPOSITORY / "src"))
+# Load the flat source directory under its public package name without installation.
+package_spec = importlib.util.spec_from_file_location("dbat", REPOSITORY / "src" / "__init__.py")
+package = importlib.util.module_from_spec(package_spec)
+sys.modules["dbat"] = package
+package_spec.loader.exec_module(package)
 
 from dbat.config import load_config
-from dbat.io import (
+from dbat.io.recording import (
     load_dat_recording,
     load_qc_annotations,
     save_preprocessing_result,
     save_qc_annotations,
     source_sha256,
 )
-from dbat.preprocessing import preprocess_recording
-from dbat.qc import new_qc_annotations, utc_now, validate_qc_annotations
+from dbat.preprocessing.annotations import (
+    new_qc_annotations,
+    utc_now,
+    validate_qc_annotations,
+)
+from dbat.preprocessing.pipeline import preprocess_recording
 
 
 def verify_saved_result(path, result):
@@ -132,7 +141,7 @@ def main():
         else new_qc_annotations(recording, config["qc"]["reviewer"])
     )
     if config["qc"]["open_gui"]:
-        from dbat.qc_gui import run_qc_gui
+        from dbat.preprocessing.qc_gui import run_qc_gui
 
         qc = run_qc_gui(recording, config, qc)
         if qc is None:

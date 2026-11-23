@@ -5,11 +5,33 @@ A local Python 3.11+ repository implementing **Phase 1 (stages 0–3)**: numeric
 conditioning. No remote is configured. No patient data or generated outputs belong
 in Git. Existing MAGMA repositories are read-only references.
 
+## Source layout
+
+```text
+src/
+  __init__.py
+  config.py
+  io/
+    __init__.py
+    recording.py
+  preprocessing/
+    __init__.py
+    annotations.py
+    pipeline.py
+    qc_gui.py
+```
+
+There is no nested `src/dbat` directory. Setuptools maps `dbat` directly to
+`src`, retaining the public import name. For example, use
+`from dbat.io.recording import load_dat_recording` and
+`from dbat.preprocessing.pipeline import preprocess_recording` after installation.
+
 ## Run a real recording now
 
 The existing MAGMA-ml interpreter already provides NumPy 2.2.6, SciPy 1.15.3,
 Matplotlib 3.11.2 and h5py 3.16.0. These commands do not install packages or import
-MAGMA code. The checker adds this repository's `src` directory to its import path.
+MAGMA code. The checker loads the flat `src` directory as the `dbat` package,
+without requiring an installation.
 
 ```powershell
 Set-Location 'D:\Experiments\DBAT'

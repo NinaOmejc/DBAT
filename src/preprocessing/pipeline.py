@@ -6,9 +6,9 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.signal import savgol_filter
 
-from .config import window_samples
-from .io import Recording
-from .qc import annotation_masks, new_qc_annotations
+from ..config import window_samples
+from ..io.recording import Recording
+from .annotations import annotation_masks, new_qc_annotations
 
 
 @dataclass

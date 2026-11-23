@@ -15,5 +15,6 @@ dependencies = [
     "h5py>=3.11,<4",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = ["dbat", "dbat.io", "dbat.preprocessing"]
+package-dir = { dbat = "src" }

@@ -12,8 +12,12 @@ from uuid import uuid4
 import h5py
 import numpy as np
 
-from . import __version__
-from .qc import recording_identity, utc_now, validate_qc_annotations
+from .. import __version__
+from ..preprocessing.annotations import (
+    recording_identity,
+    utc_now,
+    validate_qc_annotations,
+)
 
 
 @dataclass(frozen=True)
