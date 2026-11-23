@@ -16,6 +16,7 @@ from .. import __version__
 from ..config import RESULT_SCHEMA
 from ..logging import logger
 from ..preprocessing.annotations import (
+    annotation_masks,
     continuous_runs,
     recording_identity,
     utc_now,
@@ -191,11 +192,10 @@ def load_qc_annotations(path, recording):
 
 
 def load_preprocessing_result(path):
-    """Read the current v2 HDF5 signals, masks and provenance without changing files.
+    """Read current signals, explicit original/processed grids, masks and metadata.
 
-    Returns a dictionary containing original/preprocessed/smoothed signals, native
-    time/fs/channels, masks, metadata and optional resampled data. Older result
-    schemas are deliberately unsupported during development; no migration occurs.
+    Original retains its native grid. Preprocessed, smoothed and all masks use
+    processed_time_sec/processed_fs_hz. Older schemas are unsupported; no migration.
     """
     path = Path(path).resolve(strict=True)
     if not path.is_file():
@@ -210,35 +210,37 @@ def load_preprocessing_result(path):
             "schema_version": RESULT_SCHEMA,
             "signals": {name: handle[f"signals/{name}"][:] for name in ("original", "preprocessed", "smoothed")},
             "respiratory_analysis_source": "signals/smoothed",
-            "time_sec": handle["time_sec"][:], "fs_hz": float(handle.attrs["fs_hz"]),
+            "original_time_sec": handle["original_time_sec"][:],
+            "processed_time_sec": handle["processed_time_sec"][:],
+            "original_fs_hz": float(handle.attrs["original_fs_hz"]),
+            "processed_fs_hz": float(handle.attrs["processed_fs_hz"]),
             "channels": handle["channels"].asstr()[:].tolist(),
             "masks": {name: dataset[:] for name, dataset in handle["masks"].items()},
-            "metadata": metadata, "resampled": None,
+            "metadata": metadata,
         }
         result["signals"]["original"].setflags(write=False)
-        if "resampled" in handle:
-            group = handle["resampled"]
-            result["resampled"] = {
-                "signals": {name: group[f"signals/{name}"][:] for name in ("preprocessed", "smoothed")},
-                "time_sec": group["time_sec"][:], "fs_hz": float(group.attrs["fs_hz"]),
-                "masks": {name: dataset[:] for name, dataset in group["masks"].items()},
-            }
     return result
 
 
 def result_metadata(result, config):
-    """Build JSON-compatible provenance and per-channel native-grid QC summaries."""
+    """Describe both grids; manual coverage is native and validity is processed."""
     recording = result.recording
+    native_qc = annotation_masks(result.qc, recording)
     return {
         "schema_version": config["output"]["schema_version"],
         "created_at_utc": utc_now(),
         "dbat_version": __version__,
         "signal_definitions": {
             "signals/original": "Immutable supplied .dat values",
-            "signals/preprocessed": "Automatic interpolation, accepted polarity and optional detrending",
+            "signals/preprocessed": "Automatic interpolation, accepted polarity, optional native detrending/filtering and primary resampling",
             "signals/smoothed": "Preprocessed plus one respiratory smoothing pass; sole respiratory-analysis source",
         },
         "respiratory_analysis_source": "signals/smoothed",
+        "original_grid": {"fs_hz": result.original_fs_hz, "time_axis": "original_time_sec",
+                          "n_samples": len(result.original), "mask_basis": "Native QC intervals in qc"},
+        "processed_grid": {"fs_hz": result.processed_fs_hz, "time_axis": "processed_time_sec",
+                           "n_samples": len(result.preprocessed), "mask_basis": "All masks/*"},
+        "channel_summary_basis": "Manual coverage/artifact durations use native QC; mask counts/valid fractions use the processed grid",
         "import_validation": "passed: numeric matrix, identity, channels and configured sampling rate",
         "identity": recording_identity(recording),
         "source": {
@@ -271,10 +273,10 @@ def result_metadata(result, config):
                 "artifact_interval_count": sum(
                     name in interval["channels"] for interval in result.qc["artifacts"]
                 ),
-                "artifact_duration_sec": int(result.masks["artifact"][:, column].sum())
+                "artifact_duration_sec": int(native_qc["artifact"][:, column].sum())
                 / recording.fs_hz,
-                "reviewed_fraction": float(result.masks["reviewed"][:, column].mean()),
-                "fully_reviewed": bool(result.masks["reviewed"][:, column].all()),
+                "reviewed_fraction": float(native_qc["reviewed"][:, column].mean()),
+                "fully_reviewed": bool(native_qc["reviewed"][:, column].all()),
                 "valid_fraction": float(result.masks["valid"][:, column].mean()),
                 **result.provenance["counts"][name],
             }
@@ -304,7 +306,10 @@ def save_preprocessing_result(result, config):
     metadata = result_metadata(result, config)
     with h5py.File(temporary / filename, "x") as handle:
         handle.attrs["schema_version"] = config["output"]["schema_version"]
-        handle.attrs["fs_hz"] = recording.fs_hz
+        handle.attrs["original_fs_hz"] = result.original_fs_hz
+        handle.attrs["processed_fs_hz"] = result.processed_fs_hz
+        handle.attrs["masks_grid"] = "processed_time_sec"
+        handle.attrs["qc_intervals_grid"] = "original_time_sec"
         handle.attrs["array_axes"] = "samples,channels"
         handle.attrs["sample_intervals"] = "zero-based half-open [start,end)"
         handle.create_dataset("channels", data=list(recording.channels), dtype=h5py.string_dtype())
@@ -312,19 +317,16 @@ def save_preprocessing_result(result, config):
             "signals/original": result.original,
             "signals/preprocessed": result.preprocessed,
             "signals/smoothed": result.smoothed,
-            "time_sec": recording.time_sec,
+            "original_time_sec": result.original_time_sec,
+            "processed_time_sec": result.processed_time_sec,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }.items():
             handle.create_dataset(name, data=values, compression="gzip", shuffle=True)
-        if result.resampled is not None:
-            group = handle.create_group("resampled")
-            group.attrs["fs_hz"] = result.resampled["fs_hz"]
-            group.attrs["array_axes"] = "samples,channels; same channel order as /channels"
-            group.create_dataset("time_sec", data=result.resampled["time_sec"], compression="gzip", shuffle=True)
-            for name in ("preprocessed", "smoothed"):
-                group.create_dataset(f"signals/{name}", data=result.resampled[name], compression="gzip", shuffle=True)
-            for name, mask in result.resampled["masks"].items():
-                group.create_dataset(f"masks/{name}", data=mask, compression="gzip", shuffle=True)
+        for name in ("original", "preprocessed", "smoothed"):
+            dataset = handle[f"signals/{name}"]
+            original = name == "original"
+            dataset.attrs["fs_hz"] = result.original_fs_hz if original else result.processed_fs_hz
+            dataset.attrs["time_axis"] = "original_time_sec" if original else "processed_time_sec"
         handle.create_dataset(
             "metadata_json",
             data=json.dumps(metadata, ensure_ascii=False, allow_nan=False),
@@ -347,7 +349,7 @@ def save_preprocessing_result(result, config):
             "  %s: %s; reviewed=%.1f%%; artifacts=%s / %g s; valid=%s/%s (%.1f%%); supported=%s",
             name, info["rating"], 100 * info["reviewed_fraction"],
             info["artifact_interval_count"], info["artifact_duration_sec"],
-            info["valid"], recording.samples.shape[0], 100 * info["valid_fraction"],
+            info["valid"], len(result.smoothed), 100 * info["valid_fraction"],
             info["smoothed_support"],
         )
     logger.debug("Output: %s", destination / filename)
@@ -370,6 +372,9 @@ def save_preview(result, config, path):
     )
     step = max(1, int(np.ceil((end - start) / config["qc"]["max_plot_points"])))
     indices = np.arange(start, end, step)
+    first, last = np.searchsorted(result.processed_time_sec, [start / recording.fs_hz, end / recording.fs_hz])
+    stride = max(1, int(np.ceil((last - first) / config["qc"]["max_plot_points"])))
+    processed_indices = np.arange(first, last, stride)
     figure = Figure(figsize=(13, 10), layout="constrained")
     FigureCanvasAgg(figure)
     channels = config["qc"]["channels"]
@@ -384,31 +389,20 @@ def save_preview(result, config, path):
             label="Original",
         )
         axis.plot(
-            recording.time_sec[indices],
-            result.preprocessed[indices, column],
+            result.processed_time_sec[processed_indices],
+            result.preprocessed[processed_indices, column],
             lw=0.7,
             label="Preprocessed",
         )
         axis.plot(
-            recording.time_sec[indices],
-            result.smoothed[indices, column],
+            result.processed_time_sec[processed_indices],
+            result.smoothed[processed_indices, column],
             lw=0.8,
             label="Smoothed (respiratory source)",
         )
-        if result.resampled is not None:
-            resampled = result.resampled
-            first, last = np.searchsorted(
-                resampled["time_sec"], [start / recording.fs_hz, end / recording.fs_hz]
-            )
-            stride = max(1, int(np.ceil((last - first) / config["qc"]["max_plot_points"])))
-            selected = slice(first, last, stride)
-            axis.plot(
-                resampled["time_sec"][selected], resampled["smoothed"][selected, column],
-                lw=0.8, label=f"Smoothed, resampled ({resampled['fs_hz']:g} Hz)",
-            )
         for key, color in (("interpolated", "teal"), ("auto_candidate", "orange")):
-            for first, last in continuous_runs(result.masks[key][start:end, column]):
-                axis.axvspan((start + first) / recording.fs_hz, (start + last) / recording.fs_hz,
+            for begin, finish in continuous_runs(result.masks[key][first:last, column]):
+                axis.axvspan((first + begin) / result.processed_fs_hz, (first + finish) / result.processed_fs_hz,
                              color=color, alpha=0.18)
         for interval in result.qc["artifacts"]:
             if (
@@ -423,8 +417,8 @@ def save_preview(result, config, path):
         axis.grid(alpha=0.2)
     axes[0].legend(loc="upper right", fontsize=8)
     axes[-1].set_xlim(start / recording.fs_hz, end / recording.fs_hz)
-    axes[-1].set_xlabel("Native time (seconds); supplied amplitude units preserved")
+    axes[-1].set_xlabel("Time (seconds); supplied amplitude units preserved")
     figure.suptitle(
-        f"{recording.recording_id} | {result.qc['review_status']} | Shading: teal = interpolated; orange = candidate"
+        f"{recording.recording_id} | native {result.original_fs_hz:g} Hz; processed {result.processed_fs_hz:g} Hz | {result.qc['review_status']} | Shading: teal = interpolated; orange = candidate"
     )
     figure.savefig(path, dpi=130)

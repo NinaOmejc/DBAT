@@ -34,28 +34,39 @@ max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing 
 [qc.annotation_files]
 # Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Accepted QC or summary JSON; path relative to this TOML.
 
-# Preprocessed signal: automatic correction, accepted polarity and optional detrending
+# Preprocessed signal: automatic correction, accepted polarity, optional detrending and filtering
 [preprocessing]
-enabled = true  # Enable configured conditioning within finite, reviewed, non-artifact runs on usable channels.
-channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts eligible for detrending/smoothing; SpO2 is only artifact-corrected; ECG/BP are pass-through TODOs.
+enabled = true  # Enable configured belt conditioning independently of review status; QC still controls analysis validity.
+channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts selected for detrending/filtering/smoothing; SpO2 is only artifact-corrected; ECG/BP are pass-through TODOs.
 check_relative_belt_polarity = false  # Optional MATLAB-style relative assessment before QC; never flips either belt automatically.
 
 # Smoothed signal: the single source for all future respiratory analyses
 [preprocessing.smoothing]
 method = "moving_mean"  # none | moving_mean | savitzky_golay; applied once here; all respiratory analyses use this saved waveform.
-window_sec = 0.25  # Moving-mean window in seconds; MATLAB default gives 50 samples at 200 Hz.
+window_sec = 0.25  # Moving-mean window in seconds on the processed grid; MATLAB rounding gives 50 samples at 200 Hz, with shrinking endpoints.
 sg_window = 51.0  # Savitzky-Golay window in sg_window_unit; must resolve to an odd number of samples.
 sg_window_unit = "samples"  # samples | seconds; 0.255 seconds at 200 Hz gives 51 samples.
 polyorder = 3  # Savitzky-Golay polynomial degree; must be nonnegative and smaller than its window in samples.
 
 # Optional slow-drift detrending
 [preprocessing.detrend]
-method = "none"  # none | moving_detrend; no hpfilter; none avoids repeating external DeTr_Norm preprocessing.
+method = "none"  # none | moving_detrend; filtering is configured separately; none avoids repeating external DeTr_Norm preprocessing.
 window_sec = 60.0  # Moving-detrend window in seconds (MATLAB default); effective odd sample length is recorded.
 
-# Optional shared resampling after native-grid signal conditioning
+# Optional native-grid Butterworth filtering (SciPy SOS; fourth order per pass)
+[preprocessing.filtering.highpass]
+enabled = false  # Apply one zero-phase high-pass before resampling; disabled for historical compatibility.
+cutoff_hz = 0.01  # High-pass cutoff in Hz, below native Nyquist.
+edge_pad_sec = 100.0  # Even reflection duration, capped at half each finite non-artifact run; matches preprocess_data.m.
+
+[preprocessing.filtering.lowpass]
+enabled = false  # Apply one zero-phase low-pass before resampling; SpO2 and ECG/BP are excluded.
+cutoff_hz = 20.0  # Low-pass cutoff in Hz, below native Nyquist; independent of the resampling anti-alias FIR.
+edge_pad_sec = 1.0  # Even reflection duration; the padded signal also receives a 12-sample odd filtfilt extension.
+
+# Optional primary processed grid, after detrending/filtering and before one smoothing pass
 [preprocessing.resampling]
-resample_freq = 0.0  # Target sampling frequency in Hz for all six derived channels; 0 keeps the native grid.
+resample_freq = 0.0  # Primary processed frequency in Hz for all six channels; 0 keeps native 200 Hz; original always stays native.
 filter_half_width = 10  # FIR half-length multiplier of max(up, down); 10 matches SciPy's standard design.
 kaiser_beta = 5.0  # Kaiser window parameter for the anti-alias FIR; SciPy's default is 5.0.
 
@@ -70,7 +81,7 @@ spo2_max_interpolation_sec = 30.0  # Maximum complete interpolated SpO2 interval
 
 # Versioned output files and inspection preview
 [output]
-schema_version = "dbat_preprocessing_v2"  # Canonical original/preprocessed/smoothed result schema; new writes must use v2.
+schema_version = "dbat_preprocessing_v3"  # Canonical original/preprocessed/smoothed result schema; new writes must use v3.
 overwrite = false  # Existing outputs are preserved through immutable versioned runs; must remain false.
 filename = "{recording_id}_preprocessing.h5"  # HDF5 filename; recording_id expands to SubN_MN.
 save_preview = true  # Save an original/preprocessed/smoothed waveform inspection PNG for each recording.

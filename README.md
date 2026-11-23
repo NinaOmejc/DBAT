@@ -41,6 +41,7 @@ dbat/
     annotations.py
     cleaning.py
     pipeline.py
+    filtering.py
     polarity.py
     resampling.py
     qc_gui.py
@@ -146,7 +147,7 @@ install packages; exact runtime versions are saved with each result.
 `check_recording()` loads immutable source samples, computes automatic corrections
 and optional polarity diagnostics once, then passes that cached preparation to the
 existing QC GUI. Accepted polarity is applied to a fresh corrected copy before
-native detrending/smoothing, common resampling and versioned saving. ECG/BP are
+native detrending/filtering, optional primary resampling, one processed-grid smoothing pass and versioned saving. ECG/BP are
 unchanged by automatic cleaning. No downstream features or labels are computed.
 
 `preprocessing.artifacts` enables automatic cleaning by default. Belts use the latest
@@ -245,13 +246,14 @@ timestamps are saved separately from the manual QC evidence.
 
 ## Signal hierarchy and the single respiratory input
 
-New results use schema **`dbat_preprocessing_v2`** and exactly three canonical
-native matrices, each `(samples, channels)` on the original grid:
+New results use schema **`dbat_preprocessing_v3`** and exactly three canonical
+matrices. Original remains native; preprocessed and smoothed share the explicit
+processed grid, which is native by default:
 
 | HDF5 dataset | Python result | Meaning |
 |---|---|---|
 | `signals/original` | `result.original` | Immutable supplied `.dat` samples |
-| `signals/preprocessed` | `result.preprocessed` | Automatic interpolation, accepted polarity and optional detrending |
+| `signals/preprocessed` | `result.preprocessed` | Automatic interpolation, accepted polarity, native detrending/filtering and optional primary resampling |
 | `signals/smoothed` | `result.smoothed` | Preprocessed values plus one configured respiratory smoothing pass |
 
 `prepared["corrected"]` remains a temporary, source-oriented input for initial
@@ -264,7 +266,9 @@ selection logic or extra smoothing. Use its relevant belt columns for peak/troug
 detection and editing, amplitudes/IBIs, session references and excursion statistics,
 physiological, spectral, wavelet, connectivity and thoracoabdominal features, and
 any derived labeling/phenotypes. Downstream detectors must not apply the general
-preprocessing smoother a second time. Method-specific spectral detrending, windows
+preprocessing smoother a second time. Use `result.processed_fs_hz` for all sample
+windows, distances, intervals and frequency calculations, and
+`result.processed_time_sec` for landmark times. Method-specific spectral detrending, windows
 and transforms are allowed, but start from this saved waveform. No future analysis
 modules are implemented just to demonstrate routing.
 
@@ -285,7 +289,7 @@ MATLAB equivalence is not claimed.
 At 200 Hz, the default smoother remains MATLAB-centered **50-sample moving mean**
 (`0.25 s`), including even-window alignment and shrinking endpoints. Optional
 `savitzky_golay` retains its odd window/polyorder settings. With smoothing `none`,
-`smoothed` equals `preprocessed`. SpO2 never receives belt smoothing or detrending,
+`smoothed` equals `preprocessed`. SpO2 never receives belt smoothing, detrending or Butterworth filtering,
 so its two representations are identical and contain its corrected numerical
 values. ECG/BP and other channels without an applicable method also pass through.
 
@@ -296,71 +300,98 @@ claimed to be untouched sensor data.
 
 ## Numerical values, processing support and QC
 
-Signal values are independent of validity. Filtering operates only within finite,
-reviewed, non-artifact runs on selected channels explicitly rated usable. Excluded,
-unreviewed, weak/unavailable or too-short runs retain their numerical input values.
-Genuine source NaN/Inf values are preserved natively. No QC exclusion introduces a
-new NaN. Short runs are not silently given smaller windows; their native bounds
-and skip reason are recorded in `processing.processing_skips`.
+Conditioning depends on `preprocessing.channels`, never the channel rating,
+`qc.channels`, or reviewed coverage. An unreviewed recording receives the same
+numerical conditioning as a reviewed recording with the same artifact/polarity
+annotations, but has zero approved `valid` samples. Original values never change.
 
-`preprocessed_support` and `smoothed_support` describe complete numerical-window
-support. Calculated boundary values may be present while full-window support is
-false. `valid` additionally requires explicit review, usable quality and no manual
-artifact. `finite`, `eligible`, `reviewed`, `artifact`, `interpolated` and
-`auto_candidate` keep their independent meanings. Successful filtering, numerical
-availability, estimated values and manual approval must never be conflated.
+The moving mean uses `round(window_sec * processed_fs_hz)` (MATLAB rounding),
+with shrinking windows at the recording start/end. These ordinary endpoints have
+numerical support and are valid when reviewed/usable. No samples are cropped,
+shifted or deleted. Finite runs shorter than a moving-mean window also shrink.
+Genuine NaN/Inf gaps remain missing, split numerical runs, and invalidate neighbouring
+calculation windows; they are not silently reconstructed by smoothing. SG requires
+its complete configured window; too-short runs retain input with false support.
 
-An unreviewed recording therefore retains numerical signals with zero approved
-valid samples; its selected filtering is deferred. A rejected artifact remains
-numerically present with false validity. Downstream breath calculations must not
-cross rejected intervals, and FFT/wavelet windows containing invalid samples must
-not contribute to accepted statistics without a separately validated policy.
-Keep interpolation provenance. Use `qc.annotation_files` to reuse accepted source-
-compatible QC; automatic correction never fabricates inspected coverage.
+`preprocessed_support`/`smoothed_support` describe numerical support, independently
+of review. `valid` also requires usable selected quality and reviewed non-artifact
+support across the calculation window. Confirmed artifacts remain numerical but
+unsupported; smoothing windows touching them stay invalid. Detrending and optional
+IIR filters do not cross confirmed artifacts or missing gaps. Skips record their
+native or processed coordinate basis. Interpolation influence is retained separately;
+filtering and upsampling never create manual evidence.
 
-## Optional shared resampling
+## Optional filtering, separate from detrending
+
+`preprocessing.detrend.method` remains `none | moving_detrend`. Filtering is an
+independent category; both Butterworth filters default **off**:
+
+```toml
+[preprocessing.filtering.highpass]
+enabled = false
+cutoff_hz = 0.01
+edge_pad_sec = 100.0
+
+[preprocessing.filtering.lowpass]
+enabled = false
+cutoff_hz = 20.0
+edge_pad_sec = 1.0
+```
+
+Only configured respiratory belts receive these filters. Each is designed with
+[SciPy `butter`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.butter.html)
+as fourth-order SOS, then applied once forward/backward with
+[SciPy `sosfiltfilt`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.sosfiltfilt.html).
+The resulting zero-phase magnitude response is the square of the single-pass
+response (effective eighth-order roll-off). No MATLAB runtime is used.
+
+The high-pass edge convention follows the MIT reference `preprocess_data.m`:
+outer **even reflection excluding the endpoints**, length
+`min(max(12, round(edge_pad_sec * native_fs)), floor((run_length - 1)/2))`, then
+an explicit 12-sample odd `sosfiltfilt` extension (three times filter order).
+The low-pass uses the same documented convention with a shorter configurable
+reflection duration. Padding is removed after filtering, preserving count/time
+origin. Each reflection-length edge guard is numerical but unsupported; this is
+an explicit conservative transient policy, not a claim that IIR settling ends
+exactly there. Runs of at most 12 samples are preserved and marked unsupported.
+IIR influence from interpolated inputs conservatively covers the entire finite
+non-artifact run. Unlike MATLAB's temporary gap filling, DBAT splits runs at real
+gaps/artifacts. Filter settings, SOS coefficients, actual padding/run bounds,
+skips, order of operations and runtime package versions are saved. No exact MATLAB
+numerical equivalence has been established.
+
+## Optional primary resampling
 
 ```toml
 [preprocessing.resampling]
-resample_freq = 0.0  # 0 disables resampling; e.g. 100.0 requests 100 Hz for all six channels.
-filter_half_width = 10  # Standard SciPy FIR half-length multiplier.
-kaiser_beta = 5.0  # Standard SciPy Kaiser window parameter.
+resample_freq = 0.0  # Default: native 200 Hz. For example, 100.0 requests 100 Hz.
+filter_half_width = 10
+kaiser_beta = 5.0
 ```
 
-TOML has no null value, so use **0** to retain the native grid. Resampling uses
-[SciPy `resample_poly`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.resample_poly.html)
-with a symmetric anti-alias FIR designed by
-[SciPy `firwin`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html).
-No new dependency is needed. A reduced integer up/down ratio defines one zero-based
-time grid for all six derived channels. Unsupported rate ratios raise an error.
-A target equal to the native rate also keeps the native grid without filtering.
+TOML has no null value; **0.0** disables resampling. Equal-native requests also
+skip it. Native correction, polarity, detrending and optional filtering happen
+first. Then [SciPy `resample_poly`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.resample_poly.html)
+with a symmetric Kaiser FIR resamples **preprocessed once**, for all six channels.
+Finally the respiratory smoother runs **once at the processed rate**. Thus
+`signals/preprocessed` and `signals/smoothed` are the primary target-grid outputs;
+there is no second `resampled/` bundle. Original remains on its untouched native grid.
+The anti-alias FIR remains necessary even if optional belt low-pass is enabled.
 
-Native preprocessing and smoothing run first, exactly once at the native rate.
-Resampling then stores `resampled/signals/preprocessed` and
-`resampled/signals/smoothed` on a common target grid for all six channels. Respiratory
-analysis on that grid must use the latter, derived from the same native smoothed
-waveform; native time/fs/channel metadata and original source values remain intact.
+The FIR uses actual finite values regardless of quality approval. Line endpoint
+extension retains numerical boundary values; its `boundary` mask and full-FIR
+support exclude those estimates from analysis. Genuine gaps are filled temporarily
+only inside the FIR, then target positions bracketed by missing native samples
+are restored to missing; absent channels stay missing. `missing_influence` marks
+the wider affected footprint. Target masks conservatively map reviewed/eligible
+coverage, artifacts, candidates, interpolation and support. Upsampling creates no
+review evidence. Resampling is independent of `preprocessing.enabled`.
 
-The FIR uses actual finite signal values even when QC or processing support is
-false. Unsupported output samples retain calculated numerical values; they are
-never replaced by NaNs merely for QC or boundary reasons. Line endpoint extension
-provides boundary display values; the `boundary` mask and full-FIR support exclude
-them from accepted analysis.
-
-For genuine nonfinite input, temporary linear filling is used only inside the FIR.
-Target positions bracketed by missing native samples remain NaN, and an entirely
-absent channel remains NaN. `missing_influence` identifies the larger filter region
-affected by that temporary fill. These calculated neighbouring values are display
-estimates, not accepted measurements. No zero-valued buffer replaces actual signal
-values. Support/validity masks require the complete FIR footprint to exclude source
-gaps, artifacts, unreviewed/unsupported processing and padding.
-
-Target-grid masks propagate reviewed/eligible/quality state, artifact/candidate
-influence and interpolation dependence. `preprocessed_interpolated` and
-`smoothed_interpolated` identify estimated-input influence even on numerically
-present but unsupported outputs; `interpolated` is their union. Upsampling creates
-no new manual evidence. Shared resampling remains independent of the belt-
-conditioning `enabled` switch; its anti-alias FIR is not ECG/BP-specific processing.
+Historical MATLAB landmark indices require exact native-grid equality.
+`result.require_native_grid()` rejects direct reuse when sampling rate or time axis
+differs; a future importer must call this guard and also check identity, polarity,
+waveform and one-based indexing. Changing just the declared sampling rate cannot
+make old indices compatible. No landmark importer or detector is implemented yet.
 
 ## Outputs and manual verification
 
@@ -370,48 +401,42 @@ directory. Accepted QC also has a separately versioned JSON under
 `qc.annotation_files`; no previous result, accepted review, `.dat`, MATLAB `.mat` or HDF5 is replaced.
 A failure during writing leaves a `.partial` directory rather than a published run.
 
-`SubN_MM_preprocessing.h5` has schema **`dbat_preprocessing_v2`**:
+`SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v3`**:
 
-- `/signals/{original,preprocessed,smoothed}`: the three native representations.
-- `/time_sec`, `/channels`, and unchanged native fs/axis/interval attributes.
-- `/masks/*`: independent native QC, processing support, valid and interpolation
-  influence masks. `valid` belongs to the smoothed analysis waveform;
-  `preprocessed_valid` is intermediate-stage support, not an alternate feature input.
-- Optional `/resampled/signals/{preprocessed,smoothed}`, `/resampled/time_sec`,
-  `/resampled/masks/*` and the separate target `fs_hz` attribute.
-- `/metadata_json`: source identity/hash, signal definitions, analysis-source
-  contract, config, QC, algorithm versions, filter parameters, skip reasons and
-  numerical/missing-data policies.
+- `/signals/original`: unchanged native values; `/original_time_sec` and the
+  `original_fs_hz` attribute define its grid.
+- `/signals/{preprocessed,smoothed}`: primary processed values;
+  `/processed_time_sec` and `processed_fs_hz` define their common grid.
+- Each signal dataset also identifies its own sampling rate and time-axis path.
+- `/masks/*`: Boolean masks on the processed grid. `valid` belongs to smoothed;
+  `preprocessed_valid` describes the intermediate stage. Original manual QC
+  intervals stay native in metadata. Coverage/artifact durations in the channel
+  summary use native manual evidence; numerical mask counts/valid fractions use
+  the processed grid.
+- `/channels`, `/metadata_json`: source identity/hash, both grids, config, QC,
+  algorithm versions, analysis-source contract, actual filters, interpolation
+  dependence and skip reasons. No `/resampled/` bundle is written.
 
-`summary.json` mirrors the metadata. Optional `preview.png` compares original,
-preprocessed and smoothed values; teal shading marks interpolation and orange marks
-candidates. The checker verifies exact HDF5/JSON round trips, native and target
-grids, unchanged source checksum, numerical preservation independently of masks,
-no fabricated gap measurements or review coverage, and the authoritative smoothed
-interface. `validation.json` is written only after checks pass. This checks storage
-and processing invariants, not clinical accuracy or exact MATLAB equivalence.
-
-### Reading current results
+`summary.json` mirrors the metadata. Optional `preview.png` compares all three
+representations on their declared time axes. The existing checker verifies exact
+HDF5/JSON round trips, both zero-origin grids, unchanged original/checksum,
+processed-grid masks and genuine numerical availability. `validation.json` is
+written only after these checks pass; this is not a clinical or MATLAB-equivalence
+validation.
 
 ```python
 from dbat.io.recording import load_preprocessing_result
 
-saved = load_preprocessing_result(h5_path)  # Pass the .h5 file, not its run directory.
+saved = load_preprocessing_result(h5_path)  # The .h5 file, not its run directory.
 respiratory_signal = saved["signals"]["smoothed"]
+fs_hz = saved["processed_fs_hz"]  # Use for subsequent respiratory detection.
+time_sec = saved["processed_time_sec"]
 valid = saved["masks"]["valid"]
 ```
 
-The reader accepts **v2 only**. No older DBAT result compatibility, aliases or
-migration are provided during development. Existing files are left untouched;
-new runs use the current schema. This is separate from the unchanged numeric
-`.dat` input loader and the MATLAB algorithm-reference audit.
-
-Focused v2 verification covered real finite reviewed/unreviewed recordings,
-manually excluded intervals and a 20-sample eligible run (temporary QC scenarios
-only in memory), exact one-pass moving mean, `none` and Savitzky-Golay, corrected
-SpO2 retention, 100 Hz round-trip storage, and 250 Hz resampling with actual source
-gaps/absent channels. All data/QA outputs remain local; no tests/frameworks
-or future feature modules were added. No MATLAB numerical comparison was run.
+Only the current schema is read. No older DBAT compatibility, aliases or migration
+are provided during development; existing outputs remain untouched. New runs use
+v3. Native `.dat` input and source-compatible standalone QC JSON remain supported.
 
 Inspect the most recent output after a successful run:
 

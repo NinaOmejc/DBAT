@@ -9,7 +9,7 @@ import tomllib
 
 CHANNELS = ("ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm")
 BELTS = ("Resp-Lungs", "Resp-Diaphragm")
-RESULT_SCHEMA = "dbat_preprocessing_v2"
+RESULT_SCHEMA = "dbat_preprocessing_v3"
 
 
 def window_samples(value, unit, fs_hz):
@@ -170,11 +170,21 @@ def _validate(config, directory):
     ]:
         if type(value) is not bool:
             raise ValueError(f"{name} must be true or false")
+    resampling = preprocessing["resampling"]
+    frequency = resampling["resample_freq"]
+    if (
+        isinstance(frequency, bool)
+        or not isinstance(frequency, (int, float))
+        or not math.isfinite(frequency)
+        or frequency < 0
+    ):
+        raise ValueError("resampling.resample_freq must be finite and nonnegative (Hz); 0 disables it")
     smoothing, detrend = preprocessing["smoothing"], preprocessing["detrend"]
     if smoothing["method"] not in {"none", "moving_mean", "savitzky_golay"}:
         raise ValueError("smoothing.method must be none, moving_mean or savitzky_golay")
-    window_samples(smoothing["window_sec"], "seconds", fs_hz)
-    sg_window = window_samples(smoothing["sg_window"], smoothing["sg_window_unit"], fs_hz)
+    processed_fs = preprocessing["resampling"]["resample_freq"] or fs_hz
+    window_samples(smoothing["window_sec"], "seconds", processed_fs)
+    sg_window = window_samples(smoothing["sg_window"], smoothing["sg_window_unit"], processed_fs)
     if (
         sg_window % 2 != 1
         or type(smoothing["polyorder"]) is not int
@@ -185,24 +195,27 @@ def _validate(config, directory):
         )
     if detrend["method"] not in {"none", "moving_detrend"}:
         raise ValueError(
-            "detrend.method must be none or moving_detrend; hpfilter is not implemented"
+            "detrend.method must be none or moving_detrend; filters belong in preprocessing.filtering"
         )
     if window_samples(detrend["window_sec"], "seconds", fs_hz) < 3:
         raise ValueError("detrend.window_sec must resolve to at least three samples")
-    resampling = preprocessing["resampling"]
-    frequency = resampling["resample_freq"]
-    if (
-        isinstance(frequency, bool)
-        or not isinstance(frequency, (int, float))
-        or not math.isfinite(frequency)
-        or frequency < 0
-    ):
-        raise ValueError("resampling.resample_freq must be finite and nonnegative (Hz); 0 disables it")
     if type(resampling["filter_half_width"]) is not int or resampling["filter_half_width"] < 1:
         raise ValueError("resampling.filter_half_width must be a positive integer")
     beta = resampling["kaiser_beta"]
     if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(beta) or beta < 0:
         raise ValueError("resampling.kaiser_beta must be finite and nonnegative")
+    for name in ("highpass", "lowpass"):
+        filtering = preprocessing["filtering"][name]
+        if type(filtering["enabled"]) is not bool:
+            raise ValueError(f"filtering.{name}.enabled must be true or false")
+        cutoff = filtering["cutoff_hz"]
+        if (isinstance(cutoff, bool) or not isinstance(cutoff, (int, float))
+                or not math.isfinite(cutoff) or not 0 < cutoff < fs_hz / 2):
+            raise ValueError(f"filtering.{name}.cutoff_hz must be between 0 and native Nyquist")
+        padding = filtering["edge_pad_sec"]
+        if (isinstance(padding, bool) or not isinstance(padding, (int, float))
+                or not math.isfinite(padding) or padding <= 0):
+            raise ValueError(f"filtering.{name}.edge_pad_sec must be positive and finite")
     artifacts = preprocessing["artifacts"]
     if artifacts["spo2_units"] not in {"percent", "unknown"}:
         raise ValueError("artifacts.spo2_units must be percent or unknown")
@@ -215,7 +228,7 @@ def _validate(config, directory):
     if artifacts["belt_max_interpolation_sec"] > 0.25:
         raise ValueError("Belt interpolation is restricted to at most 0.25 seconds")
     if output["schema_version"] != RESULT_SCHEMA or output["overwrite"] is not False:
-        raise ValueError("Use dbat_preprocessing_v2 and output.overwrite=false (versioned saves)")
+        raise ValueError("Use dbat_preprocessing_v3 and output.overwrite=false (versioned saves)")
     try:
         filename = output["filename"].format(recording_id="Sub1_M1")
     except (KeyError, ValueError) as error:

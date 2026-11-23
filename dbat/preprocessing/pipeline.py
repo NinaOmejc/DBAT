@@ -1,9 +1,9 @@
-"""Build numerical preprocessed/smoothed signals with independent analysis masks."""
+"""Build primary processed signals with independent numerical and QC support."""
 
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import maximum_filter1d, uniform_filter1d
+from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
 from scipy.signal import savgol_filter
 
 from ..config import BELTS, window_samples
@@ -11,47 +11,79 @@ from ..io.recording import Recording
 from ..logging import logger
 from .annotations import annotation_masks, continuous_runs, new_qc_annotations, recording_identity
 from .cleaning import clean_recording, preprocess_spo2 as preprocess_spo2
+from .filtering import filter_belt
 from .polarity import apply_polarity, assess_relative_belt_polarity, saved_polarity_decision
-from .resampling import resample_views
+from .resampling import resample_preprocessed
 
 
 @dataclass
 class PreprocessingResult:
-    """Original, preprocessed and authoritative smoothed signals with separate QC."""
+    """Immutable native original and one primary preprocessed/smoothed sample grid."""
 
     recording: Recording
     preprocessed: np.ndarray
     smoothed: np.ndarray
+    processed_fs_hz: float
+    processed_time_sec: np.ndarray
     masks: dict
     qc: dict
     provenance: dict
-    resampled: dict | None = None
 
     @property
     def original(self):
-        """Return the immutable supplied native samples without making a copy."""
+        """Return immutable supplied native samples without making a copy."""
         return self.recording.samples
 
     @property
+    def original_fs_hz(self):
+        """Return the original sampling rate in Hz."""
+        return self.recording.fs_hz
+
+    @property
+    def original_time_sec(self):
+        """Return the original zero-origin native time axis in seconds."""
+        return self.recording.time_sec
+
+    @property
     def respiratory_signal(self):
-        """Return smoothed, the sole respiratory-analysis input; obey masks['valid']."""
+        """Return smoothed; detectors must use processed_fs_hz and masks['valid']."""
         return self.smoothed
+
+    def require_native_grid(self):
+        """Reject direct historical native landmark-index reuse on a changed grid.
+
+        Call before transferring native MATLAB indices; identity, indexing-base,
+        polarity and waveform checks are also required by a future importer.
+        No index conversion or landmark import is performed here.
+        """
+        if self.processed_fs_hz != self.original_fs_hz or not np.array_equal(
+            self.processed_time_sec, self.original_time_sec
+        ):
+            raise ValueError(
+                "Native landmark indices cannot be reused on a different processed grid"
+            )
 
 
 def prepare_recording(recording, config):
     """Run automatic cleaning and source-oriented polarity assessment once.
 
-    Returns corrected native data, automatic masks/events, a compatibility
+    Returns corrected native data, automatic masks/events, a preparation
     signature and diagnostics. No manual evidence or polarity flip is inferred.
     """
-    logger.info("  Automatic correction and optional polarity assessment for %s...", recording.recording_id)
+    logger.info(
+        "  Automatic correction and optional polarity assessment for %s...", recording.recording_id
+    )
     prepared = clean_recording(recording, config)
     reliable = (
         np.isfinite(prepared["corrected"])
-        & ~prepared["masks"]["interpolated"] & ~prepared["masks"]["auto_candidate"]
+        & ~prepared["masks"]["interpolated"]
+        & ~prepared["masks"]["auto_candidate"]
     )
     prepared["polarity"] = assess_relative_belt_polarity(
-        prepared["corrected"], recording.channels, recording.fs_hz, reliable,
+        prepared["corrected"],
+        recording.channels,
+        recording.fs_hz,
+        reliable,
         config["preprocessing"]["check_relative_belt_polarity"],
     )
     logger.debug("Automatic cleaning: %s", prepared["provenance"]["channels"])
@@ -73,117 +105,141 @@ def moving_mean(values, window):
     return means / weights
 
 
-def _condition_runs(values, eligible, method, window, polyorder=0):
-    """Process eligible finite runs; mark incomplete window margins unsupported.
+def _window_influence(flagged, finite, window, method):
+    """Map flagged input samples to actual moving-mean/SG calculation windows.
 
-    Returns numerical values and full-window support independently. Excluded or
-    short runs retain their input values with false support. Source nonfinite
-    values remain nonfinite. Filtering never crosses a gap or QC exclusion;
-    calculated moving-mean/SG boundary values have false full-window support.
+    Natural recording endpoints shrink (mean) or shift (SG) without inventing
+    missing support. Internal gaps remain flagged through the nominal window.
     """
-    output = values.copy()
-    supported = np.zeros(values.shape, dtype=bool)
-    before, after = window // 2, (window - 1) // 2
-    for start, end in continuous_runs(eligible):
-        if end - start < window:
-            continue
-        run = values[start:end]
-        if method == "savitzky_golay":
-            result = savgol_filter(run, window, polyorder, mode="interp")
-        else:
-            trend = moving_mean(run, window)
-            result = run - trend if method == "moving_detrend" else trend
-            if method == "moving_detrend":
-                # MATLAB detrend_flow removes the mean residual as well.
-                # https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/detrend_flow.m
-                result = result - np.mean(result)
-        output[start:end] = result
-        supported[start + before : end - after] = True
-    return output, supported
+    influence = maximum_filter1d(flagged.astype(np.uint8), window, mode="constant", cval=0).astype(
+        bool
+    )
+    if method == "savitzky_golay" and window > 1:
+        margin = window // 2
+        for start, end in continuous_runs(finite):
+            if end - start >= window:
+                influence[start : start + margin] |= flagged[start : start + window].any()
+                influence[end - margin : end] |= flagged[end - window : end].any()
+    return influence
 
 
-def _passthrough_channel(values):
-    """Return separate unchanged views and finite-only numerical support."""
-    finite = np.isfinite(values)
-    return values.copy(), values.copy(), finite, finite.copy()
-
-
-def preprocess_belt(values, eligible, detrend, smoothing):
-    """Condition a native belt vector within reviewed, usable finite runs.
+def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
+    """Detrend/filter a native belt independently of ratings and reviewed coverage.
 
     Parameters
     ----------
-    values : ndarray, shape (n_samples,)
-        Native belt samples; never modified.
-    eligible : ndarray of bool
-        Finite, reviewed, non-artifact support on a usable channel.
-    detrend, smoothing : dict
-        Methods and effective native sample windows.
+    values : ndarray, shape (native_samples,)
+        Corrected, polarity-oriented input, never modified.
+    artifact, interpolated : ndarray of bool
+        Confirmed native artifacts and automatic interpolation influence.
+    fs_hz : float
+        Native sampling rate in Hz.
+    detrend, filtering : dict
+        Detrend parameters and separate Butterworth high/low-pass settings.
 
     Returns
     -------
-    tuple of ndarray
-        Unsmoothed/smoothed vectors, then their full-window support masks.
-        Processing stays within eligible runs; gaps are never bridged.
+    tuple
+        Numerical values, support, interpolation influence, filter provenance,
+        and skipped detrend runs. Gaps/artifacts split runs; QC ratings do not.
     """
-    preprocessed = values.copy()
-    preprocessed_support = np.isfinite(values)
+    allowed = np.isfinite(values) & ~artifact
+    output, support, influence = values.copy(), allowed.copy(), interpolated.copy()
+    skips = []
     if detrend["method"] != "none":
-        preprocessed, preprocessed_support = _condition_runs(
-            values, eligible, detrend["method"], detrend["window_samples"]
-        )
-    smoothed, smoothed_support = preprocessed.copy(), preprocessed_support.copy()
-    if smoothing["method"] != "none":
-        smoothed, smoothed_support = _condition_runs(
-            preprocessed,
-            eligible & preprocessed_support,
-            smoothing["method"],
-            smoothing["window_samples"],
-            smoothing["polyorder"] or 0,
-        )
-    return preprocessed, smoothed, preprocessed_support, smoothed_support
+        window = detrend["window_samples"]
+        for start, end in continuous_runs(allowed):
+            if end - start < window:
+                support[start:end] = False
+                skips.append(
+                    {
+                        "start_sample": int(start),
+                        "end_sample": int(end),
+                        "reason": "shorter_than_detrend_window",
+                    }
+                )
+                continue
+            # Adapted from the MIT MATLAB detrend_flow arithmetic:
+            # https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/detrend_flow.m
+            residual = values[start:end] - moving_mean(values[start:end], window)
+            output[start:end] = residual - np.mean(residual)
+            if influence[start:end].any():
+                influence[start:end] = True  # Run-wide residual-mean removal.
+        support &= minimum_filter1d(
+            allowed.astype(np.uint8), window, mode="constant", cval=1
+        ).astype(bool)
+    output, filter_support, influence, filter_details = filter_belt(
+        output, allowed, influence, fs_hz, filtering
+    )
+    return output, support & filter_support, influence, filter_details, skips
 
+
+def _smooth_belt(values, support, eligible, interpolated, parameters):
+    """Smooth finite processed runs once, retaining ordinary boundary support.
+
+    Returns values, support, valid, interpolation influence and skipped SG runs.
+    Moving means shrink even for short runs. Genuine missing samples stay missing;
+    neighbouring incomplete support is invalid, never converted into artificial NaNs.
+    """
+    finite = np.isfinite(values)
+    method, window = parameters["method"], parameters["window_samples"]
+    output = values.copy()
+    skips = []
+    if method == "none":
+        return output, support.copy(), eligible & support, interpolated.copy(), skips
+    numeric_support = support.copy()
+    for start, end in continuous_runs(finite):
+        run = values[start:end]
+        if method == "savitzky_golay":
+            if len(run) < window:
+                numeric_support[start:end] = False
+                skips.append(
+                    {
+                        "start_sample": int(start),
+                        "end_sample": int(end),
+                        "reason": "shorter_than_savitzky_golay_window",
+                    }
+                )
+                continue
+            output[start:end] = savgol_filter(run, window, parameters["polyorder"], mode="interp")
+        else:
+            output[start:end] = moving_mean(run, window)
+    numeric_support &= finite & ~_window_influence(~support, finite, window, method)
+    valid = numeric_support & eligible & ~_window_influence(~eligible, finite, window, method)
+    influence = _window_influence(interpolated, finite, window, method) & finite
+    return output, numeric_support, valid, influence, skips
 
 
 def preprocess_ecg(values):
-    """Pass through native ECG; TODO: add validated ECG-specific conditioning.
-
-    Returns two independent views and finite support; shared resampling is applied
-    afterwards by preprocess_recording, independently of this placeholder.
-    """
-    return _passthrough_channel(values)
+    """Pass through ECG; TODO: validated ECG-specific conditioning, beyond resampling."""
+    return values.copy()
 
 
 def preprocess_bp(values):
-    """Pass through native BP; TODO: add validated BP-specific conditioning.
-
-    Returns two independent views and finite support. Common resampling remains
-    available without implying that blood-pressure conditioning is implemented.
-    """
-    return _passthrough_channel(values)
+    """Pass through BP; TODO: validated BP-specific conditioning, beyond resampling."""
+    return values.copy()
 
 
 def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
-    """Prepare signal-specific native views and optionally resample all channels.
+    """Correct, detrend/filter natively, optionally resample once, then smooth once.
 
     Parameters
     ----------
     recording : Recording
-        Supplied float64 samples (n_samples, n_channels) and native fs in Hz.
+        Immutable native samples and declared native frequency in Hz.
     config : dict
-        Validated grouped configuration. Detrending defaults to none.
+        Validated grouped settings. Optional filters and resampling default off.
     qc_annotations : dict, optional
-        Accepted native QC; missing QC stays unreviewed, never implicitly clean.
+        Native manual QC; absent review never becomes approved analysis evidence.
     prepared : dict, optional
-        Cached prepare_recording result, shared with the initial QC GUI.
+        Cached automatic correction/polarity result shared with initial QC.
 
     Returns
     -------
     PreprocessingResult
-        Immutable original, preprocessed and authoritative smoothed waveforms,
-        finite/artifact/reviewed/uncertain/eligibility/support/valid masks.
-        Quality approval requires selection in qc.channels, reviewed coverage and
-        an explicit usable rating. Optional resampled views have a separate grid.
+        Original on the native grid; preprocessed/smoothed and every mask on one
+        explicit processed grid. Numerical conditioning ignores ratings/reviewed
+        coverage. Future respiratory detection uses smoothed and processed_fs_hz.
     """
     if (
         recording.fs_hz != config["input"]["fs_hz"]
@@ -194,12 +250,21 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     qc = qc_annotations if qc_annotations is not None else new_qc_annotations(recording)
     masks = annotation_masks(qc, recording)
     prepared = prepare_recording(recording, config) if prepared is None else prepared
-    if prepared["identity"] != recording_identity(recording) or prepared["corrected"].shape != recording.samples.shape:
+    if (
+        prepared["identity"] != recording_identity(recording)
+        or prepared["corrected"].shape != recording.samples.shape
+    ):
         raise ValueError("Prepared signals do not match the source identity/native grid")
     decision = saved_polarity_decision(qc, prepared)
     choice = decision["choice"] if decision else None
-    if prepared["polarity"]["polarity_warning"] and choice is None and not (decision and decision["acknowledged_warning"]):
-        raise ValueError("Polarity warning requires an explicit reviewer choice or acknowledgement in the QC GUI")
+    if (
+        prepared["polarity"]["polarity_warning"]
+        and choice is None
+        and not (decision and decision["acknowledged_warning"])
+    ):
+        raise ValueError(
+            "Polarity warning requires an explicit reviewer choice or acknowledgement in the QC GUI"
+        )
     corrected = apply_polarity(prepared["corrected"], recording.channels, choice)
     masks.update(prepared["masks"])
     masks["finite"] = np.isfinite(corrected)
@@ -208,142 +273,143 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
         [qc["channel_ratings"][name] in {"weak", "unassessed"} for name in recording.channels]
     )
     selected = np.array([name in config["qc"]["channels"] for name in recording.channels])
-    masks["quality_selected"] = np.broadcast_to(selected, recording.samples.shape).copy()
+    masks["quality_selected"] = np.broadcast_to(selected, corrected.shape).copy()
     masks["uncertain"] = ~masks["reviewed"] | unknown[None, :] | ~masks["quality_selected"]
     masks["eligible"] = (
-        masks["quality_selected"] & masks["finite"] & masks["reviewed"]
-        & ~masks["artifact"] & usable[None, :]
+        masks["quality_selected"]
+        & masks["finite"]
+        & masks["reviewed"]
+        & ~masks["artifact"]
+        & usable[None, :]
     )
     settings = config["preprocessing"]
+    detrend_window = window_samples(settings["detrend"]["window_sec"], "seconds", recording.fs_hz)
+    detrend_window += detrend_window % 2 == 0
     detrend = settings["detrend"]["method"] if settings["enabled"] else "none"
+    detrend_parameters = {
+        "method": detrend,
+        "fs_hz": recording.fs_hz,
+        "window_samples": detrend_window if detrend != "none" else None,
+        "mean_offset": "per_finite_non_artifact_run" if detrend != "none" else None,
+    }
+    filtering = {
+        name: {**options, "enabled": options["enabled"] and settings["enabled"]}
+        for name, options in settings["filtering"].items()
+    }
+    preprocessed = corrected.copy()
+    masks["preprocessed_support"] = masks["finite"] & ~masks["artifact"]
+    masks["preprocessed_interpolated"] = masks["interpolated"].copy()
+    processors, filter_details, processing_skips = {}, {}, {}
+    for column, name in enumerate(recording.channels):
+        if name in BELTS and name in settings["channels"]:
+            (
+                preprocessed[:, column],
+                masks["preprocessed_support"][:, column],
+                masks["preprocessed_interpolated"][:, column],
+                filter_details[name],
+                skips,
+            ) = preprocess_belt(
+                corrected[:, column],
+                masks["artifact"][:, column],
+                masks["interpolated"][:, column],
+                recording.fs_hz,
+                detrend_parameters,
+                filtering,
+            )
+            processors[name] = "belt_conditioning"
+            processing_skips[name] = {"detrend_native_grid": skips}
+        elif name in {"ECG1", "ECG2"}:
+            preprocessed[:, column] = preprocess_ecg(corrected[:, column])
+            processors[name] = "ecg_todo_passthrough"
+        elif name == "Blood Pressure":
+            preprocessed[:, column] = preprocess_bp(corrected[:, column])
+            processors[name] = "bp_todo_passthrough"
+        else:
+            processors[name] = (
+                "spo2_corrected_without_belt_filters"
+                if name == "SpO2"
+                else "unselected_passthrough"
+            )
+    masks["preprocessed_valid"] = masks["eligible"] & masks["preprocessed_support"]
+    preprocessed, masks, processed_fs, times, resampling = resample_preprocessed(
+        preprocessed, masks, recording.fs_hz, settings["resampling"]
+    )
     smoothing = settings["smoothing"]["method"] if settings["enabled"] else "none"
-    smooth_window = window_samples(settings["smoothing"]["window_sec"], "seconds", recording.fs_hz)
+    smooth_window = window_samples(settings["smoothing"]["window_sec"], "seconds", processed_fs)
     if smoothing == "savitzky_golay":
         smooth_window = window_samples(
             settings["smoothing"]["sg_window"],
             settings["smoothing"]["sg_window_unit"],
-            recording.fs_hz,
+            processed_fs,
         )
-    detrend_window = window_samples(settings["detrend"]["window_sec"], "seconds", recording.fs_hz)
-    detrend_window += detrend_window % 2 == 0
-    detrend_parameters = {
-        "method": detrend,
-        "window_samples": detrend_window if detrend != "none" else None,
-        "mean_offset": "per_continuous_run" if detrend != "none" else None,
-    }
     smoothing_parameters = {
         "method": smoothing,
+        "fs_hz": processed_fs,
         "window_samples": smooth_window if smoothing != "none" else None,
         "polyorder": settings["smoothing"]["polyorder"] if smoothing == "savitzky_golay" else None,
+        "passes": 1 if smoothing != "none" else 0,
     }
-    preprocessed = np.empty_like(corrected)
-    smoothed = np.empty_like(corrected)
-    preprocessed_support = np.empty_like(masks["finite"])
-    smoothed_support = np.empty_like(masks["finite"])
-    processors = {}
-    processing_skips = {}
-    masks["preprocessed_interpolated"] = masks["interpolated"].copy()
-    masks["smoothed_interpolated"] = masks["interpolated"].copy()
+    smoothed = preprocessed.copy()
+    masks["smoothed_support"] = masks["preprocessed_support"].copy()
+    masks["smoothed_interpolated"] = masks["preprocessed_interpolated"].copy()
+    masks["valid"] = masks["preprocessed_valid"].copy()
     for column, name in enumerate(recording.channels):
-        values, eligible = corrected[:, column], masks["eligible"][:, column]
-        if name in BELTS and name in settings["channels"] and selected[column]:
-            channel_result = preprocess_belt(values, eligible, detrend_parameters, smoothing_parameters)
-            processors[name] = "belt_conditioning"
-        elif name == "SpO2":
-            channel_result = _passthrough_channel(values)
-            processors[name] = "spo2_corrected_without_filtering"
-        elif name in {"ECG1", "ECG2"}:
-            channel_result = preprocess_ecg(values)
-            processors[name] = "ecg_todo_passthrough"
-        elif name == "Blood Pressure":
-            channel_result = preprocess_bp(values)
-            processors[name] = "bp_todo_passthrough"
-        else:
-            channel_result = _passthrough_channel(values)
-            processors[name] = "unselected_passthrough"
-        (
-            preprocessed[:, column],
-            smoothed[:, column],
-            preprocessed_support[:, column],
-            smoothed_support[:, column],
-        ) = channel_result
-        if name in BELTS and name in settings["channels"] and selected[column]:
-            smooth_eligible = eligible & preprocessed_support[:, column]
-            processing_skips[name] = {}
-            for stage, method, allowed, window in (
-                ("preprocessed", detrend, eligible, detrend_window),
-                ("smoothed", smoothing, smooth_eligible, smooth_window),
-            ):
-                if method != "none":
-                    processing_skips[name][stage] = {
-                        "excluded_samples_preserved": int((~allowed).sum()),
-                        "short_runs_preserved": [
-                            {"start_sample": int(start), "end_sample": int(end),
-                             "reason": "shorter_than_configured_window"}
-                            for start, end in continuous_runs(allowed) if end - start < window
-                        ],
-                    }
-            dependence = masks["interpolated"][:, column].copy()
-            if detrend != "none":
-                for start, end in continuous_runs(eligible):
-                    if end - start >= detrend_window and dependence[start:end].any():
-                        dependence[start:end] = True  # Run-wide residual-mean removal.
-            masks["preprocessed_interpolated"][:, column] = dependence
-            smoothed_dependence = dependence.copy()
-            if smoothing != "none":
-                for start, end in continuous_runs(smooth_eligible):
-                    if end - start < smooth_window:
-                        continue
-                    run = dependence[start:end]
-                    influence = maximum_filter1d(
-                        run.astype(np.uint8), smooth_window, mode="constant", cval=0,
-                    ).astype(bool)
-                    if smoothing == "savitzky_golay" and smooth_window > 1:
-                        margin = smooth_window // 2
-                        influence[:margin] = run[:smooth_window].any()
-                        influence[-margin:] = run[-smooth_window:].any()
-                    smoothed_dependence[start:end] = influence
-            masks["smoothed_interpolated"][:, column] = smoothed_dependence
-    masks["preprocessed_interpolated"] &= np.isfinite(preprocessed)
-    masks["smoothed_interpolated"] &= np.isfinite(smoothed)
-    masks["preprocessed_support"] = preprocessed_support
-    masks["smoothed_support"] = smoothed_support
-    masks["preprocessed_valid"] = masks["eligible"] & preprocessed_support & np.isfinite(preprocessed)
-    masks["valid"] = masks["eligible"] & smoothed_support & np.isfinite(smoothed)
+        if processors[name] == "belt_conditioning":
+            (
+                smoothed[:, column],
+                masks["smoothed_support"][:, column],
+                masks["valid"][:, column],
+                masks["smoothed_interpolated"][:, column],
+                skips,
+            ) = _smooth_belt(
+                preprocessed[:, column],
+                masks["preprocessed_support"][:, column],
+                masks["eligible"][:, column],
+                masks["preprocessed_interpolated"][:, column],
+                smoothing_parameters,
+            )
+            processing_skips[name]["smoothing_processed_grid"] = skips
+    masks["finite"] = np.isfinite(preprocessed) & np.isfinite(smoothed)
     provenance = {
-        "algorithm_version": "dbat_preprocessing_v4",
+        "algorithm_version": "dbat_preprocessing_v5",
         "enabled": settings["enabled"],
         "selected_channels": settings["channels"],
         "qc_channels": config["qc"]["channels"],
         "channel_processors": processors,
         "detrend": detrend_parameters,
+        "filtering": filter_details,
         "smoothing": smoothing_parameters,
-        "edge_policy": "Run-local shrink (moving mean) or interp (SG); full-window margins excluded",
-        "short_run_policy": "Keep input values; support false when the configured window cannot be applied",
-        "signal_policy": "Numerical values are independent of QC and processing-support masks",
+        "resampling": resampling,
+        "processing_order": "automatic correction; accepted polarity; native detrend; native highpass; native lowpass; optional resampling; one processed-grid smoothing pass",
+        "edge_policy": "Moving mean shrinks at recording ends with valid numerical support; genuine gap/artifact influence stays unsupported. Optional IIR reflection guards remain unsupported.",
+        "signal_policy": "Numerical conditioning is independent of channel ratings, QC channel selection and reviewed coverage",
         "processing_skips": processing_skips,
         "respiratory_analysis_source": "signals/smoothed",
-        "respiratory_analysis_policy": "All future respiratory analyses start from smoothed and respect valid/interpolated masks; no second general smoothing pass",
+        "respiratory_analysis_fs_hz": processed_fs,
+        "respiratory_analysis_policy": "Every future respiratory detector/analysis uses smoothed, processed_fs_hz and valid/interpolated masks; no second general smoothing pass",
+        "native_landmark_indices_compatible": processed_fs == recording.fs_hz
+        and np.array_equal(times, recording.time_sec),
+        "native_landmark_policy": "Require exact native-grid equality before direct historical MATLAB index reuse; otherwise reject direct reuse",
         "matlab_difference": "All respiratory reference and spectral inputs use smoothed; MATLAB also uses unsmoothed recordings for some calculations",
         "quality_policy": "Only selected QC channels with explicitly inspected support and usable ratings are eligible",
         "automatic_cleaning": {"signature": prepared["signature"], **prepared["provenance"]},
-        "polarity": {"assessment": prepared["polarity"], "decision": decision, "applied_to": choice},
+        "polarity": {
+            "assessment": prepared["polarity"],
+            "decision": decision,
+            "applied_to": choice,
+        },
         "limitations": [
             "No MATLAB numerical comparison performed",
             "Review coverage may be partial",
-            "Weak, unavailable and unassessed channels are ineligible",
             "Automatic candidates are heuristic; interpolation is estimated, not newly inspected evidence",
-            "One smoothed respiratory source is an intentional DBAT design; no MATLAB numerical equivalence is claimed",
         ],
         "counts": {
             name: {key: int(mask[:, column].sum()) for key, mask in masks.items()}
             for column, name in enumerate(recording.channels)
         },
     }
-    result = PreprocessingResult(recording, preprocessed, smoothed, masks, qc, provenance)
-    result.resampled, provenance["resampling"] = resample_views(result, settings["resampling"])
-    logger.debug("Smoothing: %s | Detrend: %s", provenance["smoothing"], provenance["detrend"])
-    logger.debug("Resampling: %s", provenance["resampling"])
-    if qc["review_status"] == "not_reviewed":
-        logger.debug("No inspected QC evidence: numerical values are retained, selected filtering is deferred and valid samples remain zero.")
-    return result
+    logger.debug("Smoothing: %s | Detrend: %s", smoothing_parameters, detrend_parameters)
+    logger.debug("Resampling: %s | Filtering: %s", resampling, filter_details)
+    return PreprocessingResult(
+        recording, preprocessed, smoothed, processed_fs, times, masks, qc, provenance
+    )
