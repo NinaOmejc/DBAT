@@ -226,11 +226,15 @@ timestamps are saved separately from the manual QC evidence.
   Corrected mode overlays the original in grey and also works for SpO2. Display
   limits never alter values. Teal hatching marks interpolation; orange marks
   unresolved candidates, distinct from red confirmed manual artifacts.
-- **Belt polarity correction** opens an inline dropdown: **None** (default),
+- The polarity section is shown only when
+  `preprocessing.check_relative_belt_polarity = true`. Hiding it preserves any
+  previously accepted decision and creates no new polarity decision.
+  **Belt polarity correction** opens an inline dropdown: **None** (default),
   **Invert Resp-Lungs**, or **Invert Resp-Diaphragm**. Selecting a choice switches
   to the corrected preview immediately; source views retain source orientation.
   The adjacent assessment is red only when all warning criteria hold. If keeping
   **None** under a red warning, check **Keep None despite warning** before Save.
+  Its choices are visible and active only while the dropdown is open.
   Saved compatible choices reload; Cancel discards all session changes.
 - **Save / Done** accepts the edit copy and immediately writes a new QC JSON before
   conditioning. Zero artifacts with some explicitly confirmed coverage is

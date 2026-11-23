@@ -41,6 +41,7 @@ class ManualQCEditor:
 
         self.recording = recording
         self.settings = config["qc"]
+        self.polarity_enabled = config["preprocessing"]["check_relative_belt_polarity"]
         self.channels = tuple(self.settings["channels"])
         self.columns = tuple(recording.channels.index(name) for name in self.channels)
         self.belt_channels = tuple(name for name in BELTS if name in self.channels)
@@ -114,35 +115,38 @@ class ManualQCEditor:
                 button.label.set_fontsize(8)
                 self.rating_buttons[name][rating] = button
                 left += width + 0.003
-        self.figure.text(0.79, 0.545, "Belt polarity correction", fontsize=9)
-        self.polarity_button = self._button(
-            (0.79, 0.500, 0.19, 0.032),
-            POLARITY_LABELS[POLARITY_CHOICES.index(self.polarity_choice)] + "  v",
-            self._toggle_polarity_menu,
-        )
-        self.polarity_button.label.set_fontsize(8)
-        self.polarity_menu = RadioButtons(
-            self.figure.add_axes((0.79, 0.370, 0.19, 0.125), zorder=10),
-            POLARITY_LABELS, active=POLARITY_CHOICES.index(self.polarity_choice),
-        )
-        for label in self.polarity_menu.labels:
-            label.set_fontsize(8)
-        self.polarity_menu.ax.set_visible(False)
-        self.polarity_menu.on_clicked(self._select_polarity)
-        diagnostic = assessment_text(self.prepared["polarity"])
-        if self.previous_polarity_stale:
-            diagnostic += "\nPrevious choice needs review: cleaning changed"
-        self.figure.text(
-            0.79, 0.488, diagnostic, va="top", fontsize=7.5,
-            color="red" if self.prepared["polarity"]["polarity_warning"] else "black",
-        )
-        self.polarity_ack = CheckButtons(
-            self.figure.add_axes((0.79, 0.395, 0.19, 0.036)),
-            ("Keep None despite warning",),
-            (bool(compatible and previous["acknowledged_warning"]),),
-        )
-        self.polarity_ack.labels[0].set_fontsize(8)
-        self.polarity_ack.ax.set_frame_on(False)
+        self.polarity_button = self.polarity_menu = self.polarity_ack = None
+        if self.polarity_enabled:
+            self.figure.text(0.79, 0.545, "Belt polarity correction", fontsize=9)
+            self.polarity_button = self._button(
+                (0.79, 0.500, 0.19, 0.032),
+                POLARITY_LABELS[POLARITY_CHOICES.index(self.polarity_choice)] + "  v",
+                self._toggle_polarity_menu,
+            )
+            self.polarity_button.label.set_fontsize(8)
+            self.polarity_menu = RadioButtons(
+                self.figure.add_axes((0.79, 0.370, 0.19, 0.125), zorder=10),
+                POLARITY_LABELS, active=POLARITY_CHOICES.index(self.polarity_choice),
+            )
+            for label in self.polarity_menu.labels:
+                label.set_fontsize(8)
+            self.polarity_menu.ax.set_visible(False)
+            self.polarity_menu.active = False
+            self.polarity_menu.on_clicked(self._select_polarity)
+            diagnostic = assessment_text(self.prepared["polarity"])
+            if self.previous_polarity_stale:
+                diagnostic += "\nPrevious choice needs review: cleaning changed"
+            self.figure.text(
+                0.79, 0.488, diagnostic, va="top", fontsize=7.5,
+                color="red" if self.prepared["polarity"]["polarity_warning"] else "black",
+            )
+            self.polarity_ack = CheckButtons(
+                self.figure.add_axes((0.79, 0.395, 0.19, 0.036)),
+                ("Keep None despite warning",),
+                (bool(compatible and previous["acknowledged_warning"]),),
+            )
+            self.polarity_ack.labels[0].set_fontsize(8)
+            self.polarity_ack.ax.set_frame_on(False)
         self.scope = RadioButtons(
             self.figure.add_axes((0.79, 0.305, 0.19, 0.075)),
             ("Both belts", "Dragged channel"),
@@ -290,8 +294,10 @@ class ManualQCEditor:
         self._draw()
 
     def _toggle_polarity_menu(self, event):
-        """Open/close an inline dropdown without a separate review window."""
-        self.polarity_menu.ax.set_visible(not self.polarity_menu.ax.get_visible())
+        """Show/activate or hide/deactivate the menu together, preventing ghost dots."""
+        visible = not self.polarity_menu.ax.get_visible()
+        self.polarity_menu.active = visible
+        self.polarity_menu.ax.set_visible(visible)
         self.figure.canvas.draw_idle()
 
     def _select_polarity(self, label):
@@ -300,6 +306,7 @@ class ManualQCEditor:
         self.corrected = apply_polarity(self.prepared["corrected"], self.recording.channels, self.polarity_choice)
         self.polarity_button.label.set_text(label + "  v")
         self.polarity_menu.ax.set_visible(False)
+        self.polarity_menu.active = False
         if self.polarity_ack.get_status()[0]:
             self.polarity_ack.set_active(0)
         self.display_mode = "corrected_view"
@@ -436,9 +443,10 @@ class ManualQCEditor:
                 button.hovercolor = "tab:blue" if selected else "0.85"
                 button.ax.set_facecolor(button.color)
                 button.label.set_color("white" if selected else "black")
-        self.polarity_ack.ax.set_visible(
-            self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None
-        )
+        if self.polarity_enabled:
+            acknowledge = self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None
+            self.polarity_ack.active = acknowledge
+            self.polarity_ack.ax.set_visible(acknowledge)
         self.axes[-1].set_xlim(self.start / self.recording.fs_hz, end / self.recording.fs_hz)
         self._message(
             f"Samples [{self.start}, {end}) | {self.window / self.recording.fs_hz:g} s | "
@@ -452,22 +460,23 @@ class ManualQCEditor:
         reviewer = self._reviewer_name()
         if not reviewer:
             return
-        acknowledged = bool(self.polarity_ack.get_status()[0])
-        if self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None and not acknowledged:
-            self._message("Check polarity: select a belt to invert, or acknowledge keeping None before Save / Done.")
-            return
-        timestamp = utc_now()
-        previous_choice = (self.qc.get("polarity") or {}).get("choice")
-        self.qc["polarity"] = {
-            "choice": self.polarity_choice, "acknowledged_warning": acknowledged,
-            "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
-            "preparation_signature": self.prepared["signature"],
-            "assessment": deepcopy(self.prepared["polarity"]),
-        }
-        self.qc["edit_history"].append({
-            "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
-            "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
-        })
+        if self.polarity_enabled:
+            acknowledged = bool(self.polarity_ack.get_status()[0])
+            if self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None and not acknowledged:
+                self._message("Check polarity: select a belt to invert, or acknowledge keeping None before Save / Done.")
+                return
+            timestamp = utc_now()
+            previous_choice = (self.qc.get("polarity") or {}).get("choice")
+            self.qc["polarity"] = {
+                "choice": self.polarity_choice, "acknowledged_warning": acknowledged,
+                "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
+                "preparation_signature": self.prepared["signature"],
+                "assessment": deepcopy(self.prepared["polarity"]),
+            }
+            self.qc["edit_history"].append({
+                "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
+                "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
+            })
         self.qc["reviewer"] = reviewer
         self.qc["gui_settings"] = {
             "channels": list(self.channels),
