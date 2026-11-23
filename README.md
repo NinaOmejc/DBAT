@@ -1,9 +1,31 @@
 # DBAT — Dysfunctional Breathing Analysis Tool
 
-A local Python 3.11+ repository implementing **Phase 1 (stages 0–3)**: numeric
+A Python 3.11+ repository implementing **Phase 1 (stages 0–3)**: numeric
 `.dat` IO, initial manual technical QC, persistent annotations, and configurable
-conditioning. No remote is configured. No patient data or generated outputs belong
-in Git. Existing MAGMA repositories are read-only references.
+conditioning. Only source code and documentation belong in Git. Recording data
+and generated results stay local. Existing MAGMA repositories are read-only references.
+
+Public source repository: [NinaOmejc/DBAT](https://github.com/NinaOmejc/DBAT).
+
+## Repository and local results
+
+```text
+D:\Experiments\DBAT\
+  DBAT\                  # Git source checkout
+    .git\
+    configs\
+    scripts\
+    src\
+  outputs\               # Local results, outside Git
+    preproc_data\
+    features\            # Reserved for a later phase
+```
+
+`configs/default.toml` sets `paths.output_dir = "../../outputs/preproc_data"`,
+resolved relative to the configuration file. This gives the sibling results
+directory shown above. The existing preprocessing run was moved there without
+altering its files; its saved provenance retains the original run-time paths.
+The empty `features` directory is local only; feature extraction remains unimplemented.
 
 ## Source layout
 
@@ -34,7 +56,7 @@ MAGMA code. The checker loads the flat `src` directory as the `dbat` package,
 without requiring an installation.
 
 ```powershell
-Set-Location 'D:\Experiments\DBAT'
+Set-Location 'D:\Experiments\DBAT\DBAT'
 $dbatPython = 'D:\Projects\MAGMA\MAGMA-ml\.venv\Scripts\python.exe'
 
 # Native IO, provenance and storage check without new review evidence.
@@ -45,14 +67,14 @@ $env:MPLBACKEND = 'TkAgg'
 & $dbatPython .\scripts\check_preprocessing.py --dat 'D:\Projects\MAGMA\raw_data\ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub1_Pom1_DeTr_Norm.dat' --gui --reviewer 'Nina'
 
 # Reuse a saved review; replace the path with the QC path printed by the GUI run.
-& $dbatPython .\scripts\check_preprocessing.py --subject 1 --measurement 1 --no-gui --qc 'D:\Experiments\DBAT\outputs\Sub1_M1\qc\<printed-version>.json'
+& $dbatPython .\scripts\check_preprocessing.py --subject 1 --measurement 1 --no-gui --qc 'D:\Experiments\DBAT\outputs\preproc_data\Sub1_M1\qc\<printed-version>.json'
 ```
 
 For a separate environment, after approving installation of the four declared
 dependencies (and setuptools build support), use:
 
 ```powershell
-Set-Location 'D:\Experiments\DBAT'
+Set-Location 'D:\Experiments\DBAT\DBAT'
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
@@ -132,8 +154,9 @@ support rules, not clinical validation or a MATLAB numerical-equivalence claim.
 
 ## Outputs and manual verification
 
-Every run uses a new `outputs/SubN_MM/runs/<UTC-version>/` directory. Accepted QC
-also has a separately versioned JSON under `outputs/SubN_MM/qc/`, reusable via
+Every run uses a new `../outputs/preproc_data/SubN_MM/runs/<UTC-version>/`
+directory. Accepted QC also has a separately versioned JSON under
+`../outputs/preproc_data/SubN_MM/qc/`, reusable via
 `--qc`; no previous result, accepted review, `.dat`, MATLAB `.mat` or HDF5 is replaced.
 A failure during writing leaves a `.partial` directory rather than a published run.
 
@@ -169,7 +192,7 @@ No MATLAB execution/comparison, package installation or automated tests were run
 Inspect the most recent output after a successful run:
 
 ```powershell
-$dbatRun = Get-ChildItem .\outputs\Sub1_M1\runs -Directory |
+$dbatRun = Get-ChildItem ..\outputs\preproc_data\Sub1_M1\runs -Directory |
     Where-Object { $_.Name -notlike '*.partial' } |
     Sort-Object Name | Select-Object -Last 1
 Get-Content -LiteralPath (Join-Path $dbatRun.FullName 'summary.json')

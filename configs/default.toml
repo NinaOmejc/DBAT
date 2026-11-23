@@ -1,7 +1,8 @@
 # Paths relative to this file are resolved from this file's directory.
 [paths]
 input_dir = "D:/Projects/MAGMA/raw_data"
-output_dir = "D:/Experiments/DBAT/outputs"
+# Sibling local outputs, outside the source checkout.
+output_dir = "../../outputs/preproc_data"
 
 [input]
 fs_hz = 200.0
