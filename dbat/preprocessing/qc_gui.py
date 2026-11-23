@@ -51,7 +51,6 @@ class ManualQCEditor:
             ),
         )
         self.shared_scale = self.settings["shared_belt_scale"]
-        self.syncing = False
         self.shading = []
         self.figure, axes = plt.subplots(
             len(self.channels), 1, sharex=True, figsize=(14, 9), squeeze=False
@@ -73,11 +72,24 @@ class ManualQCEditor:
             "",
             initial=self.settings["reviewer"] or self.qc["reviewer"],
         )
-        self.figure.text(0.79, 0.865, "Recording-level channel rating", fontsize=9)
-        self.channel = RadioButtons(
-            self.figure.add_axes((0.79, 0.63, 0.19, 0.225)), self.channels
-        )
-        self.rating = RadioButtons(self.figure.add_axes((0.79, 0.455, 0.19, 0.15)), RATINGS)
+        self.buttons = []  # Widgets must remain alive for their callbacks.
+        self.figure.text(0.79, 0.865, "Rate individual channels", fontsize=9)
+        self.rating_buttons = {}
+        row_height = min(0.10, 0.40 / len(self.channels))
+        for row, name in enumerate(self.channels):
+            top = 0.84 - row * row_height
+            self.figure.text(0.79, top, name, fontsize=9, va="top")
+            self.rating_buttons[name] = {}
+            left = 0.79
+            for rating, width in zip(RATINGS, (0.056, 0.036, 0.032, 0.057), strict=True):
+                button = self._button(
+                    (left, top - 0.045, width, 0.028),
+                    rating.capitalize(),
+                    lambda event, name=name, rating=rating: self._set_rating(name, rating),
+                )
+                button.label.set_fontsize(8)
+                self.rating_buttons[name][rating] = button
+                left += width + 0.003
         self.scope = RadioButtons(
             self.figure.add_axes((0.79, 0.335, 0.19, 0.095)),
             ("Both belts", "Dragged channel"),
@@ -85,7 +97,6 @@ class ManualQCEditor:
             if self.settings["artifact_scope"] == "both_belts" and len(self.belt_channels) == 2
             else 1,
         )
-        self.buttons = []  # Widgets must remain alive for their callbacks.
         self._button((0.79, 0.27, 0.19, 0.04), "Confirm visible", self._confirm_visible)
         self.scale_button = self._button(
             (0.79, 0.21, 0.19, 0.04),
@@ -117,8 +128,6 @@ class ManualQCEditor:
             initial=str(self.settings["window_length"]),
         )
         self.window_box.on_submit(self._set_window)
-        self.channel.on_clicked(self._select_channel)
-        self.rating.on_clicked(self._set_rating)
         self.figure.canvas.mpl_connect("button_press_event", self._remove_artifact)
         self.selectors = [
             SpanSelector(
@@ -131,8 +140,15 @@ class ManualQCEditor:
             )
             for axis, name in zip(self.axes, self.channels, strict=True)
         ]
-        self._select_channel(self.channels[0])
         self._draw()
+        # Native maximization follows the current monitor's available screen area.
+        window = getattr(self.figure.canvas.manager, "window", None)
+        if hasattr(window, "showMaximized"):  # Qt
+            window.showMaximized()
+        elif hasattr(window, "state"):  # Tk on Windows
+            window.state("zoomed")
+        elif hasattr(window, "Maximize"):  # wx
+            window.Maximize(True)
 
     def _button(self, rectangle, label, callback):
         """Create one retained Matplotlib button with a direct callback."""
@@ -203,20 +219,10 @@ class ManualQCEditor:
         self.window = max(2, min(self.recording.samples.shape[0], length))
         self._navigate(self.start)
 
-    def _select_channel(self, name):
-        """Display the channel's existing rating without recording a new decision."""
-        self.syncing = True
-        self.rating.set_active(RATINGS.index(self.qc["channel_ratings"][name]))
-        self.syncing = False
-
-    def _set_rating(self, rating):
-        """Record an explicit technical rating and its reviewer/time provenance."""
-        if self.syncing:
-            return
+    def _set_rating(self, name, rating):
+        """Rate one channel directly, retaining reviewer/time and edit provenance."""
         reviewer = self._reviewer_name()
-        name = self.channel.value_selected
         if not reviewer:
-            self._select_channel(name)
             return
         old = self.qc["channel_ratings"][name]
         provenance = {"reviewer": reviewer, "created_at_utc": utc_now(), "source": "dbat_manual_qc"}
@@ -300,7 +306,7 @@ class ManualQCEditor:
             self._draw()
 
     def _draw(self):
-        """Refresh only the viewport; use full-resolution values for amplitude limits."""
+        """Refresh the viewport and rating highlights; use native values for limits."""
         end = self.start + self.window
         step = max(1, math.ceil(self.window / self.settings["max_plot_points"]))
         indices = np.arange(self.start, end, step)
@@ -342,6 +348,13 @@ class ManualQCEditor:
                                 interval["start_sec"], interval["end_sec"], color=color, alpha=alpha
                             )
                         )
+        for name, buttons in self.rating_buttons.items():
+            for rating, button in buttons.items():
+                selected = self.qc["channel_ratings"][name] == rating
+                button.color = "tab:blue" if selected else "0.95"
+                button.hovercolor = "tab:blue" if selected else "0.85"
+                button.ax.set_facecolor(button.color)
+                button.label.set_color("white" if selected else "black")
         self.axes[-1].set_xlim(self.start / self.recording.fs_hz, end / self.recording.fs_hz)
         self._message(
             f"Samples [{self.start}, {end}) | {self.window / self.recording.fs_hz:g} s | "

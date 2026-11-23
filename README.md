@@ -132,9 +132,13 @@ install packages; exact runtime versions are saved with each result.
   remain stored on their original shared time grid. Slider, Previous/Next and zoom buttons move
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
   200 Hz; `600` seconds is **120000 samples**. Drawing alone may be thinned.
-- Enter a reviewer. Choose a channel and explicitly assign `usable`, `weak`, or
-  `unavailable`; all start `unassessed`. Channel selection alone does not rate it.
-  These are technical ratings, never a clinical minimal-excursion assessment.
+- The GUI opens maximized to the current monitor's available screen area on the
+  standard Windows Tk/Qt/wx backends. Normal window controls remain available.
+- Enter a reviewer. **Rate individual channels** shows one row per displayed
+  channel, with all four ratings visible. Click `usable`, `weak`, `unavailable` or
+  `unassessed` directly in that row; the current choice is highlighted. Opening
+  the GUI preserves saved ratings and creates no new rating evidence. These are
+  technical ratings, never a clinical minimal-excursion assessment.
 - Left-drag on a belt in **Both belts** mode to mark both belts. **Dragged channel**
   marks only the subplot receiving the drag, including SpO2. Red shading is an
   artifact. Right-click it to remove the most recent overlapping annotation, then
