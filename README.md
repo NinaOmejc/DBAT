@@ -84,6 +84,7 @@ selected subject/measurement combination, matching MATLAB `run_magma.m`:
 
 ```toml
 [run]
+verbosity = 1
 subjects = [1, 2]
 measurements = [1, 2]
 exclude_recordings = [[2, 1]]
@@ -95,6 +96,12 @@ are skipped; cancelling a recording's GUI skips that recording and continues.
 Missing/malformed input or processing errors stop the run with an actionable error.
 Every completed recording uses the same package preprocessing functions and gets
 its own versioned result and round-trip verification.
+
+`run.verbosity` controls all DBAT console progress through the shared `dbat` logger:
+**0** is silent, **1** (default) shows recording IDs and high-level steps, and
+**2** additionally shows round-trip details, channel/QC statistics, processing
+parameters and output paths. Saved results and verification run at every level.
+Package modules can use `logging.getLogger(__name__)` to inherit this setting.
 
 Set **`qc.open_gui = true`** or **`false`** in TOML; no paired GUI command-line flags
 are needed. Reviewer, viewing window, preview saving and scientific methods are

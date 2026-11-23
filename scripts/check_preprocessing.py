@@ -8,6 +8,8 @@ Writes versioned HDF5/JSON results and optional previews, then checks each round
 
 import argparse
 import json
+import logging
+import sys
 from pathlib import Path
 
 import h5py
@@ -29,6 +31,7 @@ from dbat.preprocessing.annotations import (
 from dbat.preprocessing.pipeline import preprocess_recording
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+logger = logging.getLogger("dbat")
 
 
 def verify_saved_result(path, result):
@@ -97,6 +100,7 @@ def check_recording(config, subject, measurement):
     Cancel returns None and leaves existing results and accepted QC untouched.
     All processing goes through the same DBAT package functions as a single run.
     """
+    logger.info("  Loading recording...")
     recording = load_dat_recording(
         config, config["input"]["dat_file"] or None, subject=subject, measurement=measurement
     )
@@ -109,37 +113,43 @@ def check_recording(config, subject, measurement):
     if config["qc"]["open_gui"]:
         from dbat.preprocessing.qc_gui import run_qc_gui
 
+        logger.info("  Manual QC...")
         qc = run_qc_gui(recording, config, qc)
         if qc is None:
-            print(
+            logger.info(
                 f"Cancelled {recording.recording_id}: no new files saved; continuing to the next recording."
             )
             return None
+        logger.info("  Saving QC...")
         qc_path = save_qc_annotations(qc, recording, config["paths"]["output_dir"])
-        print(f"Accepted QC saved before conditioning: {qc_path}")
+        logger.debug(f"Accepted QC saved before conditioning: {qc_path}")
+
+    logger.info("  Preprocessing...")
     result = preprocess_recording(recording, config, qc)
+    logger.info("  Saving and verifying result...")
     path = save_preprocessing_result(result, config)
+
     summary = verify_saved_result(path, result)
-    print(
+    logger.debug(
         f"Round trip verified: {recording.recording_id} | shape={recording.samples.shape} | "
         f"fs={recording.fs_hz:g} Hz | duration={summary['duration_sec']:g} s"
     )
-    print(
+    logger.debug(
         f"QC: {qc['review_status']} | {len(qc['artifacts'])} original artifact intervals (union durations below)"
     )
     for name, info in summary["channels"].items():
-        print(
+        logger.debug(
             f"  {name}: {info['rating']}; reviewed={info['reviewed_fraction']:.1%}; "
             f"artifacts={info['artifact_interval_count']} / {info['artifact_duration_sec']:g} s; "
             f"valid={info['valid']}/{recording.samples.shape[0]} ({info['valid_fraction']:.1%}); "
             f"supported={info['respiratory_support']}"
         )
-    print(f"Smoothing: {result.provenance['smoothing']} | Detrend: {result.provenance['detrend']}")
+    logger.debug(f"Smoothing: {result.provenance['smoothing']} | Detrend: {result.provenance['detrend']}")
     if qc["review_status"] == "not_reviewed":
-        print(
+        logger.debug(
             "No inspected QC evidence: selected conditioning is deferred; valid samples remain zero."
         )
-    print(
+    logger.debug(
         f"Output: {path}\nMetadata/QA: {path.parent / 'summary.json'} | {path.parent / 'validation.json'}"
     )
     return path
@@ -147,6 +157,8 @@ def check_recording(config, subject, measurement):
 
 def main(config_file):
     """Run Phase 1 for the configured subject/measurement Cartesian product.
+
+    Configure all dbat console progress from run.verbosity.
 
     Parameters
     ----------
@@ -161,20 +173,29 @@ def main(config_file):
     """
     config = load_config(config_file)
     selection = config["run"]
+    levels = {0: logging.CRITICAL + 1, 1: logging.INFO, 2: logging.DEBUG}
+    logger.setLevel(levels[selection["verbosity"]])
+    logger.propagate = False
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
     excluded = {tuple(pair) for pair in selection["exclude_recordings"]}
     outputs = []
-    # Same selection convention as MATLAB run_magma.m: all combinations, not zip.
-    # https://github.com/NinaOmejc/magma-labeling/blob/main/src/run_magma.m
+
     for subject in selection["subjects"]:
         for measurement in selection["measurements"]:
+
             if (subject, measurement) in excluded:
-                print(f"Skipping excluded Sub{subject}_M{measurement}")
+                logger.info(f"Skipping excluded Sub{subject}_M{measurement}")
                 continue
-            print(f"Processing Sub{subject}_M{measurement}")
+
+            logger.info(f"Processing Sub{subject}_M{measurement}")
             output = check_recording(config, subject, measurement)
             if output is not None:
                 outputs.append(output)
-    print(f"Completed {len(outputs)} recording(s).")
+
+    logger.info(f"Completed {len(outputs)} recording(s).")
     return outputs
 
 

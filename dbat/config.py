@@ -75,6 +75,9 @@ def _validate_selection(selection):
 def _validate(config, directory):
     """Reject unsupported settings and inconsistent units before loading data."""
     _validate_selection(config["run"])
+    verbosity = config["run"]["verbosity"]
+    if type(verbosity) is not int or verbosity not in (0, 1, 2):
+        raise ValueError("run.verbosity must be 0 (silent), 1 (progress), or 2 (detailed)")
     input_config, qc = config["input"], config["qc"]
     preprocessing, output = config["preprocessing"], config["output"]
     fs_hz = input_config["fs_hz"]
