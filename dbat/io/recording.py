@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 
 from .. import __version__
+from ..config import RESULT_SCHEMA
 from ..logging import logger
 from ..preprocessing.annotations import (
     continuous_runs,
@@ -183,10 +184,46 @@ def load_qc_annotations(path, recording):
     logger.debug("QC source: %s", path)
     with path.open(encoding="utf-8") as stream:
         document = json.load(stream)
-    qc = document["qc"] if document.get("schema_version") == "dbat_preprocessing_v1" else document
+    qc = document["qc"] if document.get("schema_version") == RESULT_SCHEMA else document
     validate_qc_annotations(qc, recording)
     qc["loaded_from_file"] = str(path)
     return qc
+
+
+def load_preprocessing_result(path):
+    """Read the current v2 HDF5 signals, masks and provenance without changing files.
+
+    Returns a dictionary containing original/preprocessed/smoothed signals, native
+    time/fs/channels, masks, metadata and optional resampled data. Older result
+    schemas are deliberately unsupported during development; no migration occurs.
+    """
+    path = Path(path).resolve(strict=True)
+    if not path.is_file():
+        raise ValueError(f"Expected a DBAT HDF5 file, not a directory: {path}")
+    with h5py.File(path, "r") as handle:
+        if handle.attrs["schema_version"] != RESULT_SCHEMA:
+            raise ValueError(f"Only {RESULT_SCHEMA} results are supported")
+        metadata = json.loads(handle["metadata_json"].asstr()[()])
+        if metadata["schema_version"] != RESULT_SCHEMA:
+            raise ValueError("HDF5 and embedded metadata schemas disagree")
+        result = {
+            "schema_version": RESULT_SCHEMA,
+            "signals": {name: handle[f"signals/{name}"][:] for name in ("original", "preprocessed", "smoothed")},
+            "respiratory_analysis_source": "signals/smoothed",
+            "time_sec": handle["time_sec"][:], "fs_hz": float(handle.attrs["fs_hz"]),
+            "channels": handle["channels"].asstr()[:].tolist(),
+            "masks": {name: dataset[:] for name, dataset in handle["masks"].items()},
+            "metadata": metadata, "resampled": None,
+        }
+        result["signals"]["original"].setflags(write=False)
+        if "resampled" in handle:
+            group = handle["resampled"]
+            result["resampled"] = {
+                "signals": {name: group[f"signals/{name}"][:] for name in ("preprocessed", "smoothed")},
+                "time_sec": group["time_sec"][:], "fs_hz": float(group.attrs["fs_hz"]),
+                "masks": {name: dataset[:] for name, dataset in group["masks"].items()},
+            }
+    return result
 
 
 def result_metadata(result, config):
@@ -196,6 +233,12 @@ def result_metadata(result, config):
         "schema_version": config["output"]["schema_version"],
         "created_at_utc": utc_now(),
         "dbat_version": __version__,
+        "signal_definitions": {
+            "signals/original": "Immutable supplied .dat values",
+            "signals/preprocessed": "Automatic interpolation, accepted polarity and optional detrending",
+            "signals/smoothed": "Preprocessed plus one respiratory smoothing pass; sole respiratory-analysis source",
+        },
+        "respiratory_analysis_source": "signals/smoothed",
         "import_validation": "passed: numeric matrix, identity, channels and configured sampling rate",
         "identity": recording_identity(recording),
         "source": {
@@ -247,6 +290,8 @@ def save_preprocessing_result(result, config):
     independently by the caller first, so a later processing failure cannot lose it.
     Returns the final HDF5 path. Incomplete writes remain in a .partial directory.
     """
+    if config["output"]["schema_version"] != RESULT_SCHEMA:
+        raise ValueError(f"New results must use {RESULT_SCHEMA}")
     recording = result.recording
     validate_qc_annotations(result.qc, recording)
     logger.info("  Saving preprocessing result for %s...", recording.recording_id)
@@ -264,11 +309,10 @@ def save_preprocessing_result(result, config):
         handle.attrs["sample_intervals"] = "zero-based half-open [start,end)"
         handle.create_dataset("channels", data=list(recording.channels), dtype=h5py.string_dtype())
         for name, values in {
-            "source/samples": recording.samples,
+            "signals/original": result.original,
+            "signals/preprocessed": result.preprocessed,
+            "signals/smoothed": result.smoothed,
             "time_sec": recording.time_sec,
-            "derived/corrected": result.corrected,
-            "derived/conditioned": result.conditioned,
-            "derived/respiratory_view": result.respiratory_view,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }.items():
             handle.create_dataset(name, data=values, compression="gzip", shuffle=True)
@@ -276,8 +320,9 @@ def save_preprocessing_result(result, config):
             group = handle.create_group("resampled")
             group.attrs["fs_hz"] = result.resampled["fs_hz"]
             group.attrs["array_axes"] = "samples,channels; same channel order as /channels"
-            for name in ("time_sec", "conditioned", "respiratory_view"):
-                group.create_dataset(name, data=result.resampled[name], compression="gzip", shuffle=True)
+            group.create_dataset("time_sec", data=result.resampled["time_sec"], compression="gzip", shuffle=True)
+            for name in ("preprocessed", "smoothed"):
+                group.create_dataset(f"signals/{name}", data=result.resampled[name], compression="gzip", shuffle=True)
             for name, mask in result.resampled["masks"].items():
                 group.create_dataset(f"masks/{name}", data=mask, compression="gzip", shuffle=True)
         handle.create_dataset(
@@ -303,7 +348,7 @@ def save_preprocessing_result(result, config):
             name, info["rating"], 100 * info["reviewed_fraction"],
             info["artifact_interval_count"], info["artifact_duration_sec"],
             info["valid"], recording.samples.shape[0], 100 * info["valid_fraction"],
-            info["respiratory_support"],
+            info["smoothed_support"],
         )
     logger.debug("Output: %s", destination / filename)
     logger.debug("Metadata: %s", destination / "summary.json")
@@ -336,23 +381,19 @@ def save_preview(result, config, path):
             recording.samples[indices, column],
             color="0.65",
             lw=0.7,
-            label="Supplied",
-        )
-        axis.plot(
-            recording.time_sec[indices], result.corrected[indices, column],
-            color="teal", lw=0.9, label="Corrected",
+            label="Original",
         )
         axis.plot(
             recording.time_sec[indices],
-            result.conditioned[indices, column],
+            result.preprocessed[indices, column],
             lw=0.7,
-            label="Conditioned (unsmoothed)",
+            label="Preprocessed",
         )
         axis.plot(
             recording.time_sec[indices],
-            result.respiratory_view[indices, column],
+            result.smoothed[indices, column],
             lw=0.8,
-            label="Respiratory view",
+            label="Smoothed (respiratory source)",
         )
         if result.resampled is not None:
             resampled = result.resampled
@@ -362,8 +403,8 @@ def save_preview(result, config, path):
             stride = max(1, int(np.ceil((last - first) / config["qc"]["max_plot_points"])))
             selected = slice(first, last, stride)
             axis.plot(
-                resampled["time_sec"][selected], resampled["respiratory_view"][selected, column],
-                lw=0.8, label=f"Resampled ({resampled['fs_hz']:g} Hz)",
+                resampled["time_sec"][selected], resampled["smoothed"][selected, column],
+                lw=0.8, label=f"Smoothed, resampled ({resampled['fs_hz']:g} Hz)",
             )
         for key, color in (("interpolated", "teal"), ("auto_candidate", "orange")):
             for first, last in continuous_runs(result.masks[key][start:end, column]):

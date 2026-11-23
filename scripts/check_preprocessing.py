@@ -13,7 +13,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from dbat.config import load_config
+from dbat.config import BELTS, RESULT_SCHEMA, load_config
 from dbat.io.recording import (
     load_dat_recording,
     load_qc_annotations,
@@ -23,6 +23,7 @@ from dbat.io.recording import (
 )
 from dbat.logging import configure_logging, logger
 from dbat.preprocessing.annotations import (
+    continuous_runs,
     new_qc_annotations,
     utc_now,
     validate_qc_annotations,
@@ -40,18 +41,19 @@ def verify_saved_result(path, result):
         summary = json.load(stream)
     with h5py.File(path, "r") as handle:
         metadata = json.loads(handle["metadata_json"].asstr()[()])
-        if metadata != summary or metadata["schema_version"] != "dbat_preprocessing_v1":
+        if metadata != summary or metadata["schema_version"] != RESULT_SCHEMA or handle.attrs["schema_version"] != RESULT_SCHEMA:
             raise ValueError("HDF5 and JSON metadata/schema disagree")
         if handle.attrs["fs_hz"] != recording.fs_hz or handle["channels"].asstr()[
             :
         ].tolist() != list(recording.channels):
             raise ValueError("Sampling rate or channel order changed during saving")
+        if set(handle["signals"]) != {"original", "preprocessed", "smoothed"} or "derived" in handle or "source" in handle:
+            raise ValueError("New results must contain exactly three canonical signal representations")
         expected_arrays = {
-            "source/samples": recording.samples,
+            "signals/original": result.original,
+            "signals/preprocessed": result.preprocessed,
+            "signals/smoothed": result.smoothed,
             "time_sec": recording.time_sec,
-            "derived/corrected": result.corrected,
-            "derived/conditioned": result.conditioned,
-            "derived/respiratory_view": result.respiratory_view,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }
         source = recording.samples
@@ -59,31 +61,63 @@ def verify_saved_result(path, result):
         oriented_source = source.copy()
         if choice is not None:
             oriented_source[:, recording.channels.index(choice)] *= -1
-        observed = ~result.masks["interpolated"]
-        if not np.array_equal(result.corrected[observed], oriented_source[observed], equal_nan=True):
-            raise ValueError("Corrected signal disagrees with source-relative polarity outside interpolation")
-        if np.any(result.masks["valid"] & ~result.masks["reviewed"]):
-            raise ValueError("Automatic processing fabricated manual review coverage")
-        if result.corrected.shape != source.shape:
-            raise ValueError("Corrected signal left the native sample grid")
+        observed = ~result.masks["interpolated"].copy()
+        detrend = result.provenance["detrend"]
+        if detrend["method"] != "none":
+            for column, name in enumerate(recording.channels):
+                if result.provenance["channel_processors"][name] != "belt_conditioning":
+                    continue
+                for start, end in continuous_runs(result.masks["eligible"][:, column]):
+                    if end - start >= detrend["window_samples"]:
+                        observed[start:end, column] = False
+        if not np.array_equal(result.preprocessed[observed], oriented_source[observed], equal_nan=True):
+            raise ValueError("Preserved values disagree with source-relative polarity outside interpolation/detrending")
+        source_finite = np.isfinite(source)
+        for values in (result.preprocessed, result.smoothed):
+            if values.shape != source.shape or np.any(source_finite & ~np.isfinite(values)):
+                raise ValueError("Processing changed the native shape or introduced nonfinite values at observed samples")
+            if not np.array_equal(values[~source_finite], oriented_source[~source_finite], equal_nan=True):
+                raise ValueError("Processing changed genuine nonfinite source values")
+        if result.respiratory_signal is not result.smoothed:
+            raise ValueError("Respiratory analysis must resolve directly to the single smoothed waveform")
+        for column, name in enumerate(recording.channels):
+            if name not in BELTS or result.provenance["smoothing"]["method"] == "none":
+                if not np.array_equal(result.smoothed[:, column], result.preprocessed[:, column], equal_nan=True):
+                    raise ValueError("A channel without respiratory smoothing differs from preprocessed")
+        if np.any(result.masks["valid"] & (~result.masks["reviewed"] | result.masks["artifact"])):
+            raise ValueError("Processing fabricated reviewed/clean analysis support")
         if result.resampled is not None:
             resampled = result.resampled
             if handle["resampled"].attrs["fs_hz"] != resampled["fs_hz"]:
                 raise ValueError("Resampled sampling rate changed during saving")
             expected_arrays.update({
-                f"resampled/{name}": resampled[name]
-                for name in ("time_sec", "conditioned", "respiratory_view")
+                f"resampled/signals/{name}": resampled[name]
+                for name in ("preprocessed", "smoothed")
             })
+            expected_arrays["resampled/time_sec"] = resampled["time_sec"]
             expected_arrays.update({
                 f"resampled/masks/{name}": mask for name, mask in resampled["masks"].items()
             })
-            n_samples = resampled["conditioned"].shape[0]
+            n_samples = resampled["preprocessed"].shape[0]
             if (
-                resampled["conditioned"].shape != (n_samples, len(recording.channels))
-                or resampled["respiratory_view"].shape != resampled["conditioned"].shape
+                resampled["preprocessed"].shape != (n_samples, len(recording.channels))
+                or resampled["smoothed"].shape != resampled["preprocessed"].shape
                 or not np.array_equal(resampled["time_sec"], np.arange(n_samples) / resampled["fs_hz"])
             ):
                 raise ValueError("Resampled channels do not share the declared zero-based time grid")
+            rate = result.provenance["resampling"]
+            numerator = np.arange(n_samples) * rate["down"]
+            left = np.minimum(numerator // rate["up"], source.shape[0] - 1)
+            right = np.minimum((numerator + rate["up"] - 1) // rate["up"], source.shape[0] - 1)
+            available = source_finite[left] & source_finite[right]
+            for name in ("preprocessed", "smoothed"):
+                if np.any(available & ~np.isfinite(resampled[name])):
+                    raise ValueError("Resampling introduced nonfinite values without genuine missing source support")
+                if np.any(~available & np.isfinite(resampled[name])):
+                    raise ValueError("Resampling fabricated numerical measurements inside a genuine source gap")
+            masks = resampled["masks"]
+            if np.any(masks["valid"] & (~masks["reviewed"] | masks["artifact"] | masks["boundary"] | masks["missing_influence"])):
+                raise ValueError("Resampling accepted contaminated or unreviewed FIR support")
         elif "resampled" in handle:
             raise ValueError("Unexpected resampled data when resampling was disabled")
         for name, expected in expected_arrays.items():
@@ -108,11 +142,14 @@ def verify_saved_result(path, result):
             {
                 "status": "passed",
                 "checked_at_utc": utc_now(),
-                "schema_version": "dbat_manual_check_v1",
+                "schema_version": "dbat_manual_check_v2",
                 "recording_id": recording.recording_id,
                 "source_sha256": recording.source_sha256,
                 "checks": [
-                    "source samples unchanged",
+                    "original source samples unchanged",
+                    "canonical original/preprocessed/smoothed schema",
+                    "numerical availability independent of QC/support masks",
+                    "one authoritative smoothed respiratory input",
                     "native time grid",
                     "channel order/fs",
                     "native and optional resampled derived arrays, boolean masks and grids",

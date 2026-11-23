@@ -1,4 +1,4 @@
-"""Optional SciPy polyphase resampling on a shared grid, retaining native QC."""
+"""Shared-grid polyphase resampling with separate numerical and analysis support."""
 
 from fractions import Fraction
 from math import ceil, isclose
@@ -9,32 +9,31 @@ from scipy.signal import firwin, resample_poly
 
 
 def resample_views(result, settings):
-    """Resample all derived channels together; return a bundle and provenance.
-
-    Native source, time and annotations are unchanged. FIR support is eroded
-    conservatively around missing values, artifacts and unsupported input samples;
-    no output influenced by these samples or padding is marked supported.
-    Quality-valid masks additionally require full reviewed, usable input support.
+    """Resample preprocessed/smoothed values without erasing QC-excluded samples.
 
     Parameters
     ----------
     result : PreprocessingResult
-        Native views and masks, each shaped (n_samples, n_channels).
+        Native (samples, channels) numerical signals and independent Boolean masks.
     settings : dict
         Target frequency in Hz (0 disables), FIR half-width and Kaiser beta.
 
     Returns
     -------
     bundle : dict or None
-        Shared-grid views, time in seconds, fs in Hz and boolean support/valid masks.
+        Shared-grid preprocessed/smoothed signals, time, fs and propagated masks.
     provenance : dict
-        Applied ratio, filter parameters, support rules and per-channel counts.
+        Filter parameters and explicit numerical/missing-data/support policies.
 
     Notes
     -----
-    SciPy supplies both filter design and polyphase resampling:
+    FIR calculations use actual finite values even when QC excludes them. Temporary
+    linear filling is used only inside the filter for genuinely nonfinite inputs.
+    Target samples bracketed by missing source data remain NaN; affected finite
+    neighbours have false full-FIR support. Endpoint line extension retains useful
+    display values while boundary/support masks exclude them from analysis.
+    SciPy implements filter design and the resampling itself:
     https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.resample_poly.html
-    https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html
     """
     native_fs = result.recording.fs_hz
     target_fs = settings["resample_freq"]
@@ -56,56 +55,76 @@ def resample_views(result, settings):
         2 * half_length + 1, 1 / max(up, down), window=("kaiser", settings["kaiser_beta"])
     )
     radius = ceil(half_length / up)
-    n_samples = result.recording.samples.shape[0]
+    n_samples, n_channels = result.original.shape
     output_count = (n_samples * up + down - 1) // down
-    source_indices = np.minimum(np.arange(output_count) * down // up, n_samples - 1)
+    numerator = np.arange(output_count) * down
+    left = np.minimum(numerator // up, n_samples - 1)
+    right = np.minimum((numerator + up - 1) // up, n_samples - 1)
 
     def full_support(mask):
-        """Map full FIR input support to the shared output grid."""
-        # All native contributors must be supported, including fractional centers.
+        """Require every native sample in the conservative FIR footprint."""
         eroded = minimum_filter1d(
             mask.astype(np.uint8), 2 * radius + 1, axis=0, mode="constant", cval=0
         )
-        return eroded[source_indices].astype(bool)
+        return eroded[left].astype(bool)
 
+    def any_influence(mask):
+        """Retain any flagged contribution within the same FIR footprint."""
+        expanded = maximum_filter1d(
+            mask.astype(np.uint8), 2 * radius + 1, axis=0, mode="constant", cval=0
+        )
+        return expanded[left].astype(bool)
+
+    boundary = np.broadcast_to(
+        ~full_support(np.ones((n_samples, 1), dtype=bool)), (output_count, n_channels)
+    ).copy()
+    masks = {
+        "boundary": boundary,
+        "reviewed": full_support(result.masks["reviewed"]),
+        "eligible": full_support(result.masks["eligible"]),
+        "artifact": any_influence(result.masks["artifact"]),
+        "auto_candidate": any_influence(result.masks["auto_candidate"]),
+        "uncertain": any_influence(result.masks["uncertain"]) | boundary,
+        "quality_selected": result.masks["quality_selected"][left].copy(),
+        "missing_influence": any_influence(~result.masks["finite"]),
+    }
     bundle = {
         "fs_hz": effective_fs,
         "time_sec": np.arange(output_count) / effective_fs,
-        "masks": {},
+        "masks": masks,
     }
+    index = np.arange(n_samples)
     for name, support_name, valid_name in (
-        ("conditioned", "conditioning_support", "conditioned_valid"),
-        ("respiratory_view", "respiratory_support", "valid"),
+        ("preprocessed", "preprocessed_support", "preprocessed_valid"),
+        ("smoothed", "smoothed_support", "valid"),
     ):
         values = getattr(result, name)
-        native_support = (
-            result.masks[support_name] & np.isfinite(values) & ~result.masks["artifact"]
+        finite = np.isfinite(values)
+        available = finite[left] & finite[right]
+        # NaNs here represent real missing/absent source support, never QC status.
+        resampled = np.full((output_count, n_channels), np.nan)
+        for column in range(n_channels):
+            observed = finite[:, column]
+            if not observed.any():
+                continue
+            numerical = values[:, column]
+            if not observed.all():
+                numerical = np.interp(index, index[observed], numerical[observed])
+            resampled[:, column] = resample_poly(
+                numerical, up, down, window=coefficients, padtype="line"
+            )
+        resampled[~available] = np.nan
+        numeric = available & np.isfinite(resampled)
+        support = (
+            full_support(result.masks[support_name] & finite & ~result.masks["artifact"]) & numeric
         )
-        support = full_support(native_support)
-        # Zeros are only filter-buffer placeholders: every affected output is NaN.
-        resampled = resample_poly(
-            np.where(native_support, values, 0.0),
-            up,
-            down,
-            axis=0,
-            window=coefficients,
-            padtype="constant",
-            cval=0.0,
-        )
-        support &= np.isfinite(resampled)
-        resampled[~support] = np.nan
         bundle[name] = resampled
-        bundle["masks"][support_name] = support
-        bundle["masks"][valid_name] = full_support(result.masks[valid_name]) & support
-        dependence_name = "conditioned_interpolated" if name == "conditioned" else "respiratory_interpolated"
-        dependence = maximum_filter1d(
-            result.masks[dependence_name].astype(np.uint8), 2 * radius + 1,
-            axis=0, mode="constant", cval=0,
-        )[source_indices].astype(bool)
-        bundle["masks"][dependence_name] = dependence & support
-    bundle["masks"]["interpolated"] = (
-        bundle["masks"]["conditioned_interpolated"] | bundle["masks"]["respiratory_interpolated"]
-    )
+        masks[support_name] = support
+        masks[valid_name] = full_support(result.masks[valid_name]) & support
+        dependence_name = f"{name}_interpolated"
+        masks[dependence_name] = any_influence(result.masks[dependence_name]) & numeric
+    masks["finite"] = np.isfinite(bundle["preprocessed"]) & np.isfinite(bundle["smoothed"])
+    masks["interpolated"] = masks["preprocessed_interpolated"] | masks["smoothed_interpolated"]
     provenance.update(
         applied=True,
         method="scipy.signal.resample_poly",
@@ -118,10 +137,14 @@ def resample_views(result, settings):
         filter_half_width=settings["filter_half_width"],
         kaiser_beta=settings["kaiser_beta"],
         native_support_radius_samples=radius,
-        order="native signal-specific conditioning, then shared resampling",
-        support_policy="Full FIR footprint required; padding/artifacts/missing/unsupported input excluded",
+        padtype="line",
+        order="native preprocessed, native smoothed once, then shared-grid resampling",
+        numerical_policy="Use actual finite values regardless of QC; retain unsupported numerical outputs",
+        missing_policy="Temporary linear fill for FIR only; target samples bordering genuine gaps remain missing",
+        support_policy="Full FIR footprint excludes padding, artifacts, missing data and unsupported processing",
+        respiratory_analysis_source="resampled/signals/smoothed",
         counts={
-            name: {key: int(mask[:, column].sum()) for key, mask in bundle["masks"].items()}
+            name: {key: int(mask[:, column].sum()) for key, mask in masks.items()}
             for column, name in enumerate(result.recording.channels)
         },
     )

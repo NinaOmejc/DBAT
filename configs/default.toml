@@ -34,15 +34,15 @@ max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing 
 [qc.annotation_files]
 # Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Accepted QC or summary JSON; path relative to this TOML.
 
-# Signal conditioning eligibility
+# Preprocessed signal: automatic correction, accepted polarity and optional detrending
 [preprocessing]
 enabled = true  # Enable configured conditioning within finite, reviewed, non-artifact runs on usable channels.
 channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts eligible for detrending/smoothing; SpO2 is only artifact-corrected; ECG/BP are pass-through TODOs.
 check_relative_belt_polarity = false  # Optional MATLAB-style relative assessment before QC; never flips either belt automatically.
 
-# Smoothing of the respiratory extraction view
+# Smoothed signal: the single source for all future respiratory analyses
 [preprocessing.smoothing]
-method = "moving_mean"  # none | moving_mean | savitzky_golay; respiratory view only, not universal spectral preprocessing.
+method = "moving_mean"  # none | moving_mean | savitzky_golay; applied once here; all respiratory analyses use this saved waveform.
 window_sec = 0.25  # Moving-mean window in seconds; MATLAB default gives 50 samples at 200 Hz.
 sg_window = 51.0  # Savitzky-Golay window in sg_window_unit; must resolve to an odd number of samples.
 sg_window_unit = "samples"  # samples | seconds; 0.255 seconds at 200 Hz gives 51 samples.
@@ -70,9 +70,9 @@ spo2_max_interpolation_sec = 30.0  # Maximum complete interpolated SpO2 interval
 
 # Versioned output files and inspection preview
 [output]
-schema_version = "dbat_preprocessing_v1"  # Native DBAT result schema identifier; keep this version unchanged.
+schema_version = "dbat_preprocessing_v2"  # Canonical original/preprocessed/smoothed result schema; new writes must use v2.
 overwrite = false  # Existing outputs are preserved through immutable versioned runs; must remain false.
 filename = "{recording_id}_preprocessing.h5"  # HDF5 filename; recording_id expands to SubN_MN.
-save_preview = true  # Save an original/conditioned waveform inspection PNG for each recording.
+save_preview = true  # Save an original/preprocessed/smoothed waveform inspection PNG for each recording.
 preview_start_sec = 0.0  # Inspection preview start time in seconds from the recording's native zero origin.
 preview_duration_sec = 60.0  # Inspection preview duration in seconds.
