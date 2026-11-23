@@ -5,17 +5,25 @@ from copy import deepcopy
 
 import matplotlib
 import numpy as np
-from matplotlib.widgets import Button, RadioButtons, Slider, SpanSelector, TextBox
+from matplotlib.patches import Patch
+from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider, SpanSelector, TextBox
 
 from ..config import BELTS, window_samples
 from .annotations import (
     RATINGS,
     make_interval,
+    continuous_runs,
     new_qc_annotations,
+    recording_identity,
     review_status,
     utc_now,
     validate_qc_annotations,
 )
+from .pipeline import prepare_recording
+from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
+
+DISPLAY_MODES = ("shared_scale", "independent_scale", "corrected_view")
+DISPLAY_LABELS = ("Shared scale", "Independent scale", "Corrected view")
 
 
 class ManualQCEditor:
@@ -27,7 +35,7 @@ class ManualQCEditor:
     channels; simply viewing or navigating never marks samples clean.
     """
 
-    def __init__(self, recording, config, qc_annotations=None):
+    def __init__(self, recording, config, qc_annotations=None, prepared=None):
         import matplotlib.pyplot as plt
 
         self.recording = recording
@@ -41,6 +49,14 @@ class ManualQCEditor:
             else new_qc_annotations(recording)
         )
         validate_qc_annotations(self.qc, recording)
+        self.prepared = prepare_recording(recording, config) if prepared is None else prepared
+        if self.prepared["identity"] != recording_identity(recording):
+            raise ValueError("GUI preparation does not match this source recording")
+        previous = self.qc.get("polarity")
+        compatible = previous and previous["preparation_signature"] == self.prepared["signature"]
+        self.polarity_choice = previous["choice"] if compatible else None
+        self.previous_polarity_stale = bool(previous and not compatible)
+        self.corrected = apply_polarity(self.prepared["corrected"], recording.channels, self.polarity_choice)
         self.qc["parent_qc_file"] = self.qc.get("loaded_from_file")
         self.result = None
         self.start = 0
@@ -50,7 +66,7 @@ class ManualQCEditor:
                 self.settings["window_length"], self.settings["window_unit"], recording.fs_hz
             ),
         )
-        self.shared_scale = self.settings["shared_belt_scale"]
+        self.display_mode = self.settings["display_mode"]
         self.shading = []
         self.figure, axes = plt.subplots(
             len(self.channels), 1, sharex=True, figsize=(14, 9), squeeze=False
@@ -59,11 +75,18 @@ class ManualQCEditor:
         self.figure.subplots_adjust(left=0.09, right=0.74, top=0.92, bottom=0.24, hspace=0.12)
         self.figure.canvas.manager.set_window_title(f"DBAT initial QC — {recording.recording_id}")
         self.figure.suptitle(
-            f"{recording.recording_id}: supplied waveform, before conditioning\n"
+            f"{recording.recording_id}: initial QC, before detrending/smoothing\n"
             "Left drag: artifact | Right click shading: remove | Confirm visible: inspected coverage",
             fontsize=11,
         )
-        self.lines = [axis.plot([], [], lw=0.75, color="tab:blue")[0] for axis in self.axes]
+        self.original_lines = [axis.plot([], [], lw=0.65, color="0.65", label="Original")[0] for axis in self.axes]
+        self.lines = [axis.plot([], [], lw=0.75, color="tab:blue", label="Displayed")[0] for axis in self.axes]
+        self.axes[0].legend(
+            handles=[self.original_lines[0], self.lines[0],
+                     Patch(facecolor="teal", alpha=0.2, hatch="//", label="Interpolated"),
+                     Patch(facecolor="orange", alpha=0.2, label="Candidate: review")],
+            loc="upper right", fontsize=7, ncol=2,
+        )
         self.axes[-1].set_xlabel("Native time (seconds)")
         self.status = self.figure.text(0.09, 0.155, "", fontsize=9)
         self.figure.text(0.79, 0.955, "Reviewer (required to save)", fontsize=9)
@@ -75,7 +98,7 @@ class ManualQCEditor:
         self.buttons = []  # Widgets must remain alive for their callbacks.
         self.figure.text(0.79, 0.865, "Rate individual channels", fontsize=9)
         self.rating_buttons = {}
-        row_height = min(0.10, 0.40 / len(self.channels))
+        row_height = min(0.075, 0.27 / len(self.channels))
         for row, name in enumerate(self.channels):
             top = 0.84 - row * row_height
             self.figure.text(0.79, top, name, fontsize=9, va="top")
@@ -90,24 +113,49 @@ class ManualQCEditor:
                 button.label.set_fontsize(8)
                 self.rating_buttons[name][rating] = button
                 left += width + 0.003
+        self.figure.text(0.79, 0.545, "Belt polarity correction", fontsize=9)
+        self.polarity_button = self._button(
+            (0.79, 0.500, 0.19, 0.032),
+            POLARITY_LABELS[POLARITY_CHOICES.index(self.polarity_choice)] + "  v",
+            self._toggle_polarity_menu,
+        )
+        self.polarity_button.label.set_fontsize(8)
+        self.polarity_menu = RadioButtons(
+            self.figure.add_axes((0.79, 0.370, 0.19, 0.125), zorder=10),
+            POLARITY_LABELS, active=POLARITY_CHOICES.index(self.polarity_choice),
+        )
+        for label in self.polarity_menu.labels:
+            label.set_fontsize(8)
+        self.polarity_menu.ax.set_visible(False)
+        self.polarity_menu.on_clicked(self._select_polarity)
+        diagnostic = assessment_text(self.prepared["polarity"])
+        if self.previous_polarity_stale:
+            diagnostic += "\nPrevious choice needs review: cleaning changed"
+        self.figure.text(
+            0.79, 0.488, diagnostic, va="top", fontsize=7.5,
+            color="red" if self.prepared["polarity"]["polarity_warning"] else "black",
+        )
+        self.polarity_ack = CheckButtons(
+            self.figure.add_axes((0.79, 0.395, 0.19, 0.036)),
+            ("Keep None despite warning",),
+            (bool(compatible and previous["acknowledged_warning"]),),
+        )
+        self.polarity_ack.labels[0].set_fontsize(8)
+        self.polarity_ack.ax.set_frame_on(False)
         self.scope = RadioButtons(
-            self.figure.add_axes((0.79, 0.335, 0.19, 0.095)),
+            self.figure.add_axes((0.79, 0.305, 0.19, 0.075)),
             ("Both belts", "Dragged channel"),
             active=0
             if self.settings["artifact_scope"] == "both_belts" and len(self.belt_channels) == 2
             else 1,
         )
-        self._button((0.79, 0.27, 0.19, 0.04), "Confirm visible", self._confirm_visible)
-        self.scale_button = self._button(
-            (0.79, 0.21, 0.19, 0.04),
-            "Belts: shared" if self.shared_scale else "Belts: independent",
-            self._toggle_scale,
+        self._button((0.79, 0.250, 0.19, 0.035), "Confirm visible", self._confirm_visible)
+        self.display_button = self._button(
+            (0.79, 0.200, 0.19, 0.035),
+            DISPLAY_LABELS[DISPLAY_MODES.index(self.display_mode)], self._toggle_display,
         )
-        if len(self.belt_channels) < 2:
-            self.scale_button.set_active(False)
-            self.scale_button.label.set_text("Belt scale: n/a")
-        self._button((0.79, 0.125, 0.19, 0.05), "Save / Done", self._save)
-        self._button((0.79, 0.055, 0.19, 0.05), "Cancel", self._cancel)
+        self._button((0.79, 0.115, 0.19, 0.05), "Save / Done", self._save)
+        self._button((0.79, 0.045, 0.19, 0.05), "Cancel", self._cancel)
         self.slider = Slider(
             self.figure.add_axes((0.14, 0.105, 0.55, 0.025)),
             "Start sample",
@@ -233,12 +281,28 @@ class ManualQCEditor:
         )
         self._draw()
 
-    def _toggle_scale(self, event):
-        """Switch the two respiratory belts between common and independent ranges."""
-        self.shared_scale = not self.shared_scale
-        self.scale_button.label.set_text(
-            "Belts: shared" if self.shared_scale else "Belts: independent"
-        )
+    def _toggle_display(self, event):
+        """Cycle source shared/independent and corrected robust display-only views."""
+        index = (DISPLAY_MODES.index(self.display_mode) + 1) % len(DISPLAY_MODES)
+        self.display_mode = DISPLAY_MODES[index]
+        self.display_button.label.set_text(DISPLAY_LABELS[index])
+        self._draw()
+
+    def _toggle_polarity_menu(self, event):
+        """Open/close an inline dropdown without a separate review window."""
+        self.polarity_menu.ax.set_visible(not self.polarity_menu.ax.get_visible())
+        self.figure.canvas.draw_idle()
+
+    def _select_polarity(self, label):
+        """Preview one explicit source-relative flip; never flip an oriented copy."""
+        self.polarity_choice = POLARITY_CHOICES[POLARITY_LABELS.index(label)]
+        self.corrected = apply_polarity(self.prepared["corrected"], self.recording.channels, self.polarity_choice)
+        self.polarity_button.label.set_text(label + "  v")
+        self.polarity_menu.ax.set_visible(False)
+        if self.polarity_ack.get_status()[0]:
+            self.polarity_ack.set_active(0)
+        self.display_mode = "corrected_view"
+        self.display_button.label.set_text("Corrected view")
         self._draw()
 
     def _add_artifact(self, low, high, name):
@@ -310,24 +374,40 @@ class ManualQCEditor:
         end = self.start + self.window
         step = max(1, math.ceil(self.window / self.settings["max_plot_points"]))
         indices = np.arange(self.start, end, step)
+        displayed = self.corrected if self.display_mode == "corrected_view" else self.recording.samples
         limits = {}
         for name, column in zip(self.channels, self.columns, strict=True):
-            values = self.recording.samples[self.start : end, column]
+            values = displayed[self.start : end, column]
             finite = values[np.isfinite(values)]
-            limits[name] = (
-                (float(finite.min()), float(finite.max())) if finite.size else (-1.0, 1.0)
-            )
-        if self.shared_scale and len(self.belt_channels) == 2:
+            if not finite.size:
+                limits[name] = (-1.0, 1.0)
+            elif self.display_mode == "corrected_view":
+                limits[name] = tuple(np.percentile(finite, [1, 99]))
+            else:
+                limits[name] = (float(finite.min()), float(finite.max()))
+        if self.display_mode == "shared_scale" and len(self.belt_channels) == 2:
             low = min(limits[name][0] for name in self.belt_channels)
             high = max(limits[name][1] for name in self.belt_channels)
             limits.update(dict.fromkeys(self.belt_channels, (low, high)))
         for patch in self.shading:
             patch.remove()
         self.shading.clear()
-        for axis, name, column, line in zip(
-            self.axes, self.channels, self.columns, self.lines, strict=True
+        for axis, name, column, line, original in zip(
+            self.axes, self.channels, self.columns, self.lines, self.original_lines, strict=True
         ):
-            line.set_data(self.recording.time_sec[indices], self.recording.samples[indices, column])
+            line.set_data(self.recording.time_sec[indices], displayed[indices, column])
+            if self.display_mode == "corrected_view":
+                original.set_data(self.recording.time_sec[indices], self.recording.samples[indices, column])
+            else:
+                original.set_data([], [])
+            for key, color, hatch in (("interpolated", "teal", "//"), ("auto_candidate", "orange", None)):
+                mask = self.prepared["masks"][key][self.start:end, column]
+                for first, last in continuous_runs(mask):
+                    self.shading.append(axis.axvspan(
+                        (self.start + first) / self.recording.fs_hz,
+                        (self.start + last) / self.recording.fs_hz,
+                        facecolor=color, edgecolor=color, alpha=0.18, hatch=hatch,
+                    ))
             low, high = limits[name]
             margin = 0.05 * (high - low) if high > low else max(0.1, abs(low) * 0.05)
             axis.set_ylim(low - margin, high + margin)
@@ -355,10 +435,13 @@ class ManualQCEditor:
                 button.hovercolor = "tab:blue" if selected else "0.85"
                 button.ax.set_facecolor(button.color)
                 button.label.set_color("white" if selected else "black")
+        self.polarity_ack.ax.set_visible(
+            self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None
+        )
         self.axes[-1].set_xlim(self.start / self.recording.fs_hz, end / self.recording.fs_hz)
         self._message(
             f"Samples [{self.start}, {end}) | {self.window / self.recording.fs_hz:g} s | "
-            f"{len(self.qc['artifacts'])} artifact intervals | Green = explicitly inspected; unshaded = unknown"
+            f"{len(self.qc['artifacts'])} manual artifacts | Green = inspected | Teal = interpolated | Orange = candidate"
         )
 
     def _save(self, event):
@@ -368,12 +451,28 @@ class ManualQCEditor:
         reviewer = self._reviewer_name()
         if not reviewer:
             return
+        acknowledged = bool(self.polarity_ack.get_status()[0])
+        if self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None and not acknowledged:
+            self._message("Check polarity: select a belt to invert, or acknowledge keeping None before Save / Done.")
+            return
+        timestamp = utc_now()
+        previous_choice = (self.qc.get("polarity") or {}).get("choice")
+        self.qc["polarity"] = {
+            "choice": self.polarity_choice, "acknowledged_warning": acknowledged,
+            "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
+            "preparation_signature": self.prepared["signature"],
+            "assessment": deepcopy(self.prepared["polarity"]),
+        }
+        self.qc["edit_history"].append({
+            "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
+            "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
+        })
         self.qc["reviewer"] = reviewer
         self.qc["gui_settings"] = {
             "channels": list(self.channels),
             "window_samples": self.window,
             "window_unit": self.settings["window_unit"],
-            "shared_belt_scale": self.shared_scale,
+            "display_mode": self.display_mode,
             "artifact_scope": self.scope.value_selected,
         }
         self.qc["accepted_at_utc"] = utc_now()
@@ -389,8 +488,12 @@ class ManualQCEditor:
         plt.close(self.figure)
 
 
-def run_qc_gui(recording, config, qc_annotations=None):
-    """Block for manual QC and return accepted annotations, or None on Cancel/X."""
+def run_qc_gui(recording, config, qc_annotations=None, prepared=None):
+    """Review cached corrected signals; return accepted QC or None on Cancel/X.
+
+    Passing prepare_recording's result reuses the original artifact detections
+    and polarity assessment throughout navigation, preview changes and saving.
+    """
     import matplotlib.pyplot as plt
 
     backend = matplotlib.get_backend().lower()
@@ -398,6 +501,6 @@ def run_qc_gui(recording, config, qc_annotations=None):
         raise RuntimeError(
             "Manual QC needs an interactive Matplotlib backend; on Windows set MPLBACKEND=TkAgg"
         )
-    editor = ManualQCEditor(recording, config, qc_annotations)
+    editor = ManualQCEditor(recording, config, qc_annotations, prepared)
     plt.show(block=True)
     return editor.result

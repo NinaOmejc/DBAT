@@ -38,7 +38,9 @@ dbat/
   preprocessing/
     __init__.py
     annotations.py
+    cleaning.py
     pipeline.py
+    polarity.py
     resampling.py
     qc_gui.py
 ```
@@ -125,6 +127,60 @@ run's `summary.json`; schema, source hash, fs, native grid and channel identity 
 match. Missing map entries remain explicitly unreviewed. The checker does not
 install packages; exact runtime versions are saved with each result.
 
+## Automatic cleaning and relative belt polarity
+
+`check_recording()` loads immutable source samples, computes automatic corrections
+and optional polarity diagnostics once, then passes that cached preparation to the
+existing QC GUI. Accepted polarity is applied to a fresh corrected copy before
+native detrending/smoothing, common resampling and versioned saving. ECG/BP are
+unchanged by automatic cleaning. No downstream features or labels are computed.
+
+`preprocessing.artifacts` enables automatic cleaning by default. Belts use the latest
+user-supplied `test_cleaning.py`: a 0.40 s median residual, robust spike threshold,
+0.035 s dilation and 0.6 s grouping. Only finite, compatible, bounded intervals up
+to `belt_max_interpolation_sec` (default/cap 0.25 s) are interpolated. Large positive
+paired peaks with 0.6–8 s widths and centers within 1.5 s are protected; this does
+not classify them as sighs. Longer disturbances and sustained negative displacements
+stay unchanged and are flagged for review. All windows use the actual native rate.
+Experimental gap and baseline-removal previews are not production cleaned signals.
+
+`preprocess_spo2()` adapts the supplied SpO2 experiment: abrupt changes of at least
+`spo2_change_threshold_pp` (8 percentage points) within about 0.15 s must reverse
+within `spo2_return_tolerance_pp` (2 points). Reliable flanks are required; longer
+events need a nearly flat plateau. Accepted intervals, including padding, are
+interpolated up to `spo2_max_interpolation_sec` (30 s by default). A recovery edge
+is not reused to reconstruct the legitimate interval between two dropouts.
+Gradual desaturations remain unchanged. No SpO2 smoothing, detrending, normalization,
+clipping or alternate NaN-cleaned representation is created. `spo2_units = "percent"`
+is an explicit input declaration, additionally checked against the supplied value
+range; use `"unknown"` when units are uncertain. Unverified units skip correction
+with an explicit provenance status. Range checks do not establish calibration.
+
+Set `preprocessing.check_relative_belt_polarity = true` to enable the optional
+[MATLAB relative assessment](https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/correct_respiratory_belt_polarity.m).
+Its default remains **false**. Corrected, source-oriented belts are temporarily
+filtered with a zero-phase fourth-order Butterworth bandpass at 0.05–0.60 Hz.
+Pearson correlations use 60 s windows / 30 s steps, at least 80% reliable paired
+samples, and `abs(r) >= 0.50` for informative windows. As in MATLAB, fractions use
+retained valid windows, and the median uses informative windows. A red warning
+requires at least three informative windows, median r <= -0.65, negative-informative
+fraction >= 80%, and informative fraction >= 60%. Automatic candidates and
+interpolated estimates are excluded from diagnostic reliability, independently of
+manual usability ratings. Disabled/insufficient assessment is explicitly neutral.
+SciPy SOS filtering is used; exact MATLAB numerical equivalence is unverified.
+
+A warning never flips a belt: inverse correlation can also reflect paradoxical
+motion. Only a saved reviewer decision can change orientation. Compatible previous
+choices require the same source identity and automatic-cleaning signature; changed
+cleaning settings require a new polarity review. Headless processing stops if a
+warning lacks an accepted choice or acknowledgement. No historical breath landmarks
+are imported; future reuse must check their recorded orientation against this choice.
+
+Automatic interpolation/candidates never supply inspected coverage or manual ratings.
+Candidates remain advisory; the reviewer decides which are confirmed artifacts.
+Interpolation, source-relative polarity, parameters, experiment hashes, events and
+timestamps are saved separately from the manual QC evidence.
+
 ## Manual QC GUI
 
 - `qc.channels` defaults to `["Resp-Lungs", "Resp-Diaphragm", "SpO2"]`, in that
@@ -149,8 +205,19 @@ install packages; exact runtime versions are saved with each result.
   (green shading); hidden channels receive no new review evidence. Navigation alone records no inspection. A usable recording-level
   rating alone does not establish locally artifact-free samples. Inspect all plots
   before confirming. Repeat through the recording for full coverage.
-- **Belts: shared/independent** switches amplitude scaling. Other channels retain
-  independent ranges. Supplied amplitude values and belt polarity are preserved.
+- The display button cycles **Shared scale** (original belts, common limits),
+  **Independent scale** (originals, individual limits), and **Corrected view**
+  (interpolated signals, chosen orientation, robust 1st–99th-percentile display
+  limits). `qc.display_mode` selects the initial mode; default is `corrected_view`.
+  Corrected mode overlays the original in grey and also works for SpO2. Display
+  limits never alter values. Teal hatching marks interpolation; orange marks
+  unresolved candidates, distinct from red confirmed manual artifacts.
+- **Belt polarity correction** opens an inline dropdown: **None** (default),
+  **Invert Resp-Lungs**, or **Invert Resp-Diaphragm**. Selecting a choice switches
+  to the corrected preview immediately; source views retain source orientation.
+  The adjacent assessment is red only when all warning criteria hold. If keeping
+  **None** under a red warning, check **Keep None despite warning** before Save.
+  Saved compatible choices reload; Cancel discards all session changes.
 - **Save / Done** accepts the edit copy and immediately writes a new QC JSON before
   conditioning. Zero artifacts with some explicitly confirmed coverage is
   `reviewed_clean`; with artifacts it is `reviewed_with_artifacts`. With neither it
@@ -171,8 +238,8 @@ Opt-in `savitzky_golay` uses SciPy `savgol_filter`, with configurable odd window
 samples or seconds and polynomial order. Opt-in `moving_detrend` follows MATLAB's
 moving-mean trend subtraction and removal of the residual mean (60 s configured
 default, rounded to odd). For separated clean runs that offset is calculated per
-run. Short runs are not silently given smaller windows. High-pass filtering,
-automated artifact detection, interpolation and polarity correction are not included.
+run. Short runs are not silently given smaller windows. These conditioning choices
+remain separate from initial automatic correction and the diagnostic bandpass.
 
 Actual conditioning only operates within continuous finite, explicitly inspected,
 non-artifact runs on channels explicitly rated **usable**. Weak/unassessed channels
@@ -183,8 +250,9 @@ accepted evidence without a GUI. Eligibility also requires selection in `qc.chan
 previous annotations on other channels are preserved without approving them for this run.
 
 `preprocess_belt` applies the configured belt detrending and respiratory smoothing.
-`preprocess_spo2` masks nonfinite or QC-ineligible values, preserving the supplied
-SpO2 scale without belt filtering or guessed saturation thresholds. `preprocess_ecg`
+`preprocess_spo2` supplies the single automatically corrected SpO2 signal unchanged
+to later processing; quality is represented by masks, not another NaN-based signal.
+`preprocess_ecg`
 and `preprocess_bp` are explicit pass-through TODOs for future signal-specific work.
 Their native views remain unchanged; common resampling still includes them.
 
@@ -235,22 +303,30 @@ A failure during writing leaves a `.partial` directory rather than a published r
 
 - `/source/samples`: unchanged loaded float64 matrix `(samples, channels)`.
 - `/time_sec`, `/channels`, and fs/axis/interval-convention attributes.
+- `/derived/corrected`: the single interpolated native signal in the chosen
+  source-relative orientation; existing nonfinite samples are preserved.
 - `/derived/conditioned`: optional detrending, without respiratory smoothing.
 - `/derived/respiratory_view`: separate configured extraction-view smoothing.
 - `/masks/{finite,artifact,reviewed,uncertain,quality_selected,eligible,conditioning_support,respiratory_support,conditioned_valid,valid}`:
   independent native-grid booleans. Support means numerical window support;
   `valid` additionally requires manual evidence and usable quality. Unknown is not
   a negative artifact decision. For pass-through channels support is finite-only.
+- `/masks/{interpolated,auto_candidate,conditioned_interpolated,respiratory_interpolated}`:
+  direct interpolation/unresolved candidates and each derived view's dependence on
+  estimated inputs. Detrending's run-mean removal may spread dependence over a run.
 - Optional `/resampled/{time_sec,conditioned,respiratory_view}` and `/resampled/masks/*`:
   all six derived channels on the shared target grid, with a separate `fs_hz`
   attribute. Native QC intervals remain indexed against `/source/samples`.
+  Resampled `conditioned_interpolated` / `respiratory_interpolated` masks propagate
+  interpolation dependence over the full FIR footprint; `interpolated` is their union.
 - `/metadata_json`: identity/hash, channel mapping, source timestamp, effective
   configuration, QC, method versions, actual window lengths, counts and limitations.
 
 `summary.json` mirrors that metadata; optional `preview.png` shows the configured
 viewport. The checker reopens HDF5/JSON, checks exact samples (including NaNs), native
 time, channels/fs, native and optional resampled arrays/grids/masks, QC bounds/provenance and unchanged source
-SHA-256. It writes `validation.json` **only after these checks pass**. This validates
+SHA-256. It also checks source-relative orientation outside interpolation and that
+valid samples never exceed explicit review coverage. It writes `validation.json` **only after these checks pass**. This validates
 serialization and invariants, not scientific accuracy or agreement with MATLAB.
 
 Implementation-time verification: the checker completed on real `Sub1_M1`
@@ -271,6 +347,20 @@ views stayed unchanged and excluded from default QC, and no unreviewed sample be
 quality-valid. The actual three-channel editor was rendered, and a one-channel
 layout was constructed. This was a no-GUI processing check, without accepted QC;
 full interactive annotation and scientific validation remain for manual inspection.
+
+Automatic-cleaning verification used the requested real recordings: Sub73/M1
+had **11 interpolated SpO2 events / 100.615 s**; Sub105/M1's brief glitch near
+546 s was corrected while the broad event near 556 s stayed unchanged. Sub107/M1's
+specified events near 1067, 1481 and 1593 s stayed unchanged. Before/after PNGs are
+local under `outputs/preproc_data/auto_cleaning_inspection`. One Sub73 result also
+passed native/corrected/resampled (100 Hz) HDF5/JSON round-trip and source-checksum
+checks, with no fabricated manual review. Inline synthetic checks covered positive,
+persistent-negative and flat belts, explicit red-warning acknowledgement, both GUI
+flip choices, compatible choice reload, Cancel and repeated processing without a
+double flip. The real Windows/Tk editor also opened maximized; its dropdown and
+display callbacks were exercised, then cancelled without accepting real QC.
+No test files/frameworks were added; no MATLAB execution/comparison or
+complete mouse-driven GUI review was performed.
 
 Inspect the most recent output after a successful run:
 

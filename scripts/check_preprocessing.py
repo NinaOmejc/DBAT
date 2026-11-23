@@ -28,7 +28,7 @@ from dbat.preprocessing.annotations import (
     utc_now,
     validate_qc_annotations,
 )
-from dbat.preprocessing.pipeline import preprocess_recording
+from dbat.preprocessing.pipeline import prepare_recording, preprocess_recording
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 logger = logging.getLogger("dbat")
@@ -50,10 +50,23 @@ def verify_saved_result(path, result):
         expected_arrays = {
             "source/samples": recording.samples,
             "time_sec": recording.time_sec,
+            "derived/corrected": result.corrected,
             "derived/conditioned": result.conditioned,
             "derived/respiratory_view": result.respiratory_view,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }
+        source = recording.samples
+        choice = result.provenance["polarity"]["applied_to"]
+        oriented_source = source.copy()
+        if choice is not None:
+            oriented_source[:, recording.channels.index(choice)] *= -1
+        observed = ~result.masks["interpolated"]
+        if not np.array_equal(result.corrected[observed], oriented_source[observed], equal_nan=True):
+            raise ValueError("Corrected signal disagrees with source-relative polarity outside interpolation")
+        if np.any(result.masks["valid"] & ~result.masks["reviewed"]):
+            raise ValueError("Automatic processing fabricated manual review coverage")
+        if result.corrected.shape != source.shape:
+            raise ValueError("Corrected signal left the native sample grid")
         if result.resampled is not None:
             resampled = result.resampled
             if handle["resampled"].attrs["fs_hz"] != resampled["fs_hz"]:
@@ -104,6 +117,7 @@ def verify_saved_result(path, result):
                     "native time grid",
                     "channel order/fs",
                     "native and optional resampled derived arrays, boolean masks and grids",
+                    "automatic correction masks, source-relative polarity and independent manual coverage",
                     "QC identity/bounds/provenance",
                     "HDF5/JSON agreement",
                 ],
@@ -115,7 +129,7 @@ def verify_saved_result(path, result):
 
 
 def check_recording(config, subject, measurement):
-    """Load, review, condition and verify one recording; return its HDF5 path.
+    """Load, prepare once, review, condition and verify one recording.
 
     Cancel returns None and leaves existing results and accepted QC untouched.
     All processing goes through the same DBAT package functions as a single run.
@@ -130,11 +144,15 @@ def check_recording(config, subject, measurement):
         if qc_file
         else new_qc_annotations(recording, config["qc"]["reviewer"])
     )
+    logger.info("  Automatic correction and optional polarity assessment...")
+    prepared = prepare_recording(recording, config)
+    logger.debug(f"Automatic cleaning: {prepared['provenance']['channels']}")
+    logger.debug(f"Relative polarity: {prepared['polarity']}")
     if config["qc"]["open_gui"]:
         from dbat.preprocessing.qc_gui import run_qc_gui
 
         logger.info("  Manual QC...")
-        qc = run_qc_gui(recording, config, qc)
+        qc = run_qc_gui(recording, config, qc, prepared=prepared)
         if qc is None:
             logger.info(
                 f"Cancelled {recording.recording_id}: no new files saved; continuing to the next recording."
@@ -145,7 +163,7 @@ def check_recording(config, subject, measurement):
         logger.debug(f"Accepted QC saved before conditioning: {qc_path}")
 
     logger.info("  Preprocessing...")
-    result = preprocess_recording(recording, config, qc)
+    result = preprocess_recording(recording, config, qc, prepared=prepared)
     logger.info("  Saving and verifying result...")
     path = save_preprocessing_result(result, config)
 

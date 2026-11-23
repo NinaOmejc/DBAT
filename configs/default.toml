@@ -24,7 +24,7 @@ channels = ["Resp-Lungs", "Resp-Diaphragm", "SpO2"]  # Channels displayed and as
 open_gui = true  # Open the manual QC editor before conditioning; false adds no new manual review evidence.
 window_length = 600.0  # Initial visible window length, expressed in window_unit.
 window_unit = "seconds"  # seconds | samples; 600 samples at 200 Hz is 3 seconds.
-shared_belt_scale = true  # Initially display both respiratory belts on a common amplitude scale.
+display_mode = "corrected_view"  # corrected_view | shared_scale | independent_scale; original modes show source orientation.
 artifact_scope = "both_belts"  # both_belts | selected_channel; the latter marks only the dragged subplot's channel.
 reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
@@ -37,7 +37,8 @@ max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing 
 # Signal conditioning eligibility
 [preprocessing]
 enabled = true  # Enable configured conditioning within finite, reviewed, non-artifact runs on usable channels.
-channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts eligible for detrending/smoothing; SpO2 has its own QC-aware path; ECG/BP are pass-through TODOs.
+channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts eligible for detrending/smoothing; SpO2 is only artifact-corrected; ECG/BP are pass-through TODOs.
+check_relative_belt_polarity = false  # Optional MATLAB-style relative assessment before QC; never flips either belt automatically.
 
 # Smoothing of the respiratory extraction view
 [preprocessing.smoothing]
@@ -60,7 +61,12 @@ kaiser_beta = 5.0  # Kaiser window parameter for the anti-alias FIR; SciPy's def
 
 # Technical artifact handling
 [preprocessing.artifacts]
-automatic_detection = false  # Manual annotations are authoritative; automatic detection is unvalidated and must remain false.
+automatic_detection = true  # Detect/correct obvious belt and SpO2 glitches before manual QC; automatic candidates are advisory.
+belt_max_interpolation_sec = 0.25  # Maximum reconstructed belt interval in seconds; longer candidates remain unchanged.
+spo2_units = "percent"  # Explicit input-unit declaration: percent | unknown; percentage-range checks must also pass before correction.
+spo2_change_threshold_pp = 8.0  # Minimum abrupt SpO2 change in percentage points within approximately 0.15 seconds.
+spo2_return_tolerance_pp = 2.0  # Maximum difference from the pre-artifact SpO2 level, in percentage points.
+spo2_max_interpolation_sec = 30.0  # Maximum complete interpolated SpO2 interval in seconds, including edge padding.
 
 # Versioned output files and inspection preview
 [output]

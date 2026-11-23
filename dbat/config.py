@@ -136,6 +136,8 @@ def _validate(config, directory):
     ):
         raise ValueError("qc.channels must be a nonempty list of unique input channel names")
     window_samples(qc["window_length"], qc["window_unit"], fs_hz)
+    if qc["display_mode"] not in {"shared_scale", "independent_scale", "corrected_view"}:
+        raise ValueError("qc.display_mode must be shared_scale, independent_scale or corrected_view")
     if qc["artifact_scope"] not in {"both_belts", "selected_channel"}:
         raise ValueError("qc.artifact_scope must be both_belts or selected_channel")
     if qc["initial_rating"] != "unassessed":
@@ -160,7 +162,8 @@ def _validate(config, directory):
         raise ValueError("qc.max_plot_points must be an integer >= 100")
     for value, name in [
         (qc["open_gui"], "qc.open_gui"),
-        (qc["shared_belt_scale"], "qc.shared_belt_scale"),
+        (preprocessing["check_relative_belt_polarity"], "preprocessing.check_relative_belt_polarity"),
+        (preprocessing["artifacts"]["automatic_detection"], "preprocessing.artifacts.automatic_detection"),
         (preprocessing["enabled"], "preprocessing.enabled"),
         (output["save_preview"], "output.save_preview"),
     ]:
@@ -199,8 +202,17 @@ def _validate(config, directory):
     beta = resampling["kaiser_beta"]
     if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(beta) or beta < 0:
         raise ValueError("resampling.kaiser_beta must be finite and nonnegative")
-    if preprocessing["artifacts"]["automatic_detection"] is not False:
-        raise ValueError("Automatic artifact detection is unvalidated and not implemented")
+    artifacts = preprocessing["artifacts"]
+    if artifacts["spo2_units"] not in {"percent", "unknown"}:
+        raise ValueError("artifacts.spo2_units must be percent or unknown")
+    for name in ("belt_max_interpolation_sec", "spo2_change_threshold_pp", "spo2_return_tolerance_pp", "spo2_max_interpolation_sec"):
+        value = artifacts[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"artifacts.{name} must be a positive finite number")
+    if artifacts["spo2_return_tolerance_pp"] >= artifacts["spo2_change_threshold_pp"]:
+        raise ValueError("SpO2 return tolerance must be smaller than the change threshold")
+    if artifacts["belt_max_interpolation_sec"] > 0.25:
+        raise ValueError("Belt interpolation is restricted to at most 0.25 seconds")
     if output["schema_version"] != "dbat_preprocessing_v1" or output["overwrite"] is not False:
         raise ValueError("Use dbat_preprocessing_v1 and output.overwrite=false (versioned saves)")
     try:

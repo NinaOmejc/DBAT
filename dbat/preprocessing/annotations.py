@@ -10,6 +10,12 @@ QC_SCHEMA = "dbat_qc_v1"
 RATINGS = ("unassessed", "usable", "weak", "unavailable")
 
 
+def continuous_runs(mask):
+    """Yield half-open start/stop pairs for true runs in a 1-D boolean mask."""
+    edges = np.flatnonzero(np.diff(np.r_[False, mask, False]))
+    return zip(edges[::2], edges[1::2], strict=True)
+
+
 def utc_now():
     """Return an explicit UTC ISO timestamp for annotation provenance."""
     return datetime.now(timezone.utc).isoformat()
@@ -126,6 +132,22 @@ def validate_qc_annotations(qc, recording):
                 raise ValueError("QC interval IDs must be nonempty and unique")
             identifiers.add(interval["id"])
             has_evidence = True
+    decision = qc.get("polarity")
+    if decision is not None:
+        if "choice" not in decision or decision["choice"] not in (None, "Resp-Lungs", "Resp-Diaphragm"):
+            raise ValueError("Invalid manual belt-polarity choice")
+        if (
+            not decision.get("reviewer", "").strip() or not decision.get("created_at_utc")
+            or decision.get("source") != "dbat_manual_qc"
+            or not isinstance(decision.get("preparation_signature"), str)
+            or len(decision["preparation_signature"]) != 64
+            or type(decision.get("acknowledged_warning")) is not bool
+        ):
+            raise ValueError("Polarity decision lacks reviewer/time/source/cleaning provenance")
+        assessment = decision.get("assessment", {})
+        if assessment.get("polarity_warning") and decision["choice"] is None and not decision["acknowledged_warning"]:
+            raise ValueError("Keeping None under a polarity warning requires explicit acknowledgement")
+        has_evidence = True
     if has_evidence and (not qc.get("accepted_at_utc") or not qc.get("reviewer", "").strip()):
         raise ValueError("Manual QC evidence requires an accepted review and a reviewer")
     if qc.get("review_status") != review_status(qc):

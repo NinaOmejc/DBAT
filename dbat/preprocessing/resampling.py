@@ -4,7 +4,7 @@ from fractions import Fraction
 from math import ceil, isclose
 
 import numpy as np
-from scipy.ndimage import minimum_filter1d
+from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import firwin, resample_poly
 
 
@@ -97,6 +97,15 @@ def resample_views(result, settings):
         bundle[name] = resampled
         bundle["masks"][support_name] = support
         bundle["masks"][valid_name] = full_support(result.masks[valid_name]) & support
+        dependence_name = "conditioned_interpolated" if name == "conditioned" else "respiratory_interpolated"
+        dependence = maximum_filter1d(
+            result.masks[dependence_name].astype(np.uint8), 2 * radius + 1,
+            axis=0, mode="constant", cval=0,
+        )[source_indices].astype(bool)
+        bundle["masks"][dependence_name] = dependence & support
+    bundle["masks"]["interpolated"] = (
+        bundle["masks"]["conditioned_interpolated"] | bundle["masks"]["respiratory_interpolated"]
+    )
     provenance.update(
         applied=True,
         method="scipy.signal.resample_poly",

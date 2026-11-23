@@ -14,6 +14,7 @@ import numpy as np
 
 from .. import __version__
 from ..preprocessing.annotations import (
+    continuous_runs,
     recording_identity,
     utc_now,
     validate_qc_annotations,
@@ -252,6 +253,7 @@ def save_preprocessing_result(result, config):
         for name, values in {
             "source/samples": recording.samples,
             "time_sec": recording.time_sec,
+            "derived/corrected": result.corrected,
             "derived/conditioned": result.conditioned,
             "derived/respiratory_view": result.respiratory_view,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
@@ -308,6 +310,10 @@ def save_preview(result, config, path):
             label="Supplied",
         )
         axis.plot(
+            recording.time_sec[indices], result.corrected[indices, column],
+            color="teal", lw=0.9, label="Corrected",
+        )
+        axis.plot(
             recording.time_sec[indices],
             result.conditioned[indices, column],
             lw=0.7,
@@ -330,6 +336,10 @@ def save_preview(result, config, path):
                 resampled["time_sec"][selected], resampled["respiratory_view"][selected, column],
                 lw=0.8, label=f"Resampled ({resampled['fs_hz']:g} Hz)",
             )
+        for key, color in (("interpolated", "teal"), ("auto_candidate", "orange")):
+            for first, last in continuous_runs(result.masks[key][start:end, column]):
+                axis.axvspan((start + first) / recording.fs_hz, (start + last) / recording.fs_hz,
+                             color=color, alpha=0.18)
         for interval in result.qc["artifacts"]:
             if (
                 name in interval["channels"]
@@ -345,6 +355,6 @@ def save_preview(result, config, path):
     axes[-1].set_xlim(start / recording.fs_hz, end / recording.fs_hz)
     axes[-1].set_xlabel("Native time (seconds); supplied amplitude units preserved")
     figure.suptitle(
-        f"{recording.recording_id} | {result.qc['review_status']} | Unknown QC is not clean; unsupported derived samples are NaN"
+        f"{recording.recording_id} | {result.qc['review_status']} | Shading: teal = interpolated; orange = candidate"
     )
     figure.savefig(path, dpi=130)

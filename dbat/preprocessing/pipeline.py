@@ -3,12 +3,14 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import uniform_filter1d
+from scipy.ndimage import maximum_filter1d, uniform_filter1d
 from scipy.signal import savgol_filter
 
 from ..config import BELTS, window_samples
 from ..io.recording import Recording
-from .annotations import annotation_masks, new_qc_annotations
+from .annotations import annotation_masks, continuous_runs, new_qc_annotations, recording_identity
+from .cleaning import clean_recording, preprocess_spo2 as preprocess_spo2
+from .polarity import apply_polarity, assess_relative_belt_polarity, saved_polarity_decision
 from .resampling import resample_views
 
 
@@ -17,6 +19,7 @@ class PreprocessingResult:
     """Native views/QC, optional common-grid resampling and reproducible provenance."""
 
     recording: Recording
+    corrected: np.ndarray
     conditioned: np.ndarray
     respiratory_view: np.ndarray
     masks: dict
@@ -25,10 +28,22 @@ class PreprocessingResult:
     resampled: dict | None = None
 
 
-def continuous_runs(mask):
-    """Return start/stop pairs for each true run in a 1-D native-grid mask."""
-    edges = np.flatnonzero(np.diff(np.r_[False, mask, False]))
-    return zip(edges[::2], edges[1::2], strict=True)
+def prepare_recording(recording, config):
+    """Run automatic cleaning and source-oriented polarity assessment once.
+
+    Returns corrected native data, automatic masks/events, a compatibility
+    signature and diagnostics. No manual evidence or polarity flip is inferred.
+    """
+    prepared = clean_recording(recording, config)
+    reliable = (
+        np.isfinite(prepared["corrected"])
+        & ~prepared["masks"]["interpolated"] & ~prepared["masks"]["auto_candidate"]
+    )
+    prepared["polarity"] = assess_relative_belt_polarity(
+        prepared["corrected"], recording.channels, recording.fs_hz, reliable,
+        config["preprocessing"]["check_relative_belt_polarity"],
+    )
+    return prepared
 
 
 def moving_mean(values, window):
@@ -115,26 +130,6 @@ def preprocess_belt(values, eligible, detrend, smoothing):
     return conditioned, view, conditioning_support, view_support
 
 
-def preprocess_spo2(values, eligible):
-    """Prepare native SpO2 using finite/manual QC, preserving the supplied scale.
-
-    Parameters
-    ----------
-    values : ndarray, shape (n_samples,)
-        Native SpO2 samples in their supplied units.
-    eligible : ndarray of bool
-        Reviewed, non-artifact support on a usable channel.
-
-    Returns
-    -------
-    tuple of ndarray
-        Two independent QC-masked views, then their finite/eligible masks.
-        No filtering, rescaling, clipping or physiological thresholds are applied.
-    """
-    supported = np.isfinite(values) & eligible
-    view = np.where(supported, values, np.nan)
-    return view, view.copy(), supported, supported.copy()
-
 
 def preprocess_ecg(values):
     """Pass through native ECG; TODO: add validated ECG-specific conditioning.
@@ -154,7 +149,7 @@ def preprocess_bp(values):
     return _passthrough_channel(values)
 
 
-def preprocess_recording(recording, config, qc_annotations=None):
+def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     """Prepare signal-specific native views and optionally resample all channels.
 
     Parameters
@@ -165,6 +160,8 @@ def preprocess_recording(recording, config, qc_annotations=None):
         Validated grouped configuration. Detrending defaults to none.
     qc_annotations : dict, optional
         Accepted native QC; missing QC stays unreviewed, never implicitly clean.
+    prepared : dict, optional
+        Cached prepare_recording result, shared with the initial QC GUI.
 
     Returns
     -------
@@ -181,7 +178,16 @@ def preprocess_recording(recording, config, qc_annotations=None):
         raise ValueError("Recording fs/channel mapping disagrees with configuration")
     qc = qc_annotations if qc_annotations is not None else new_qc_annotations(recording)
     masks = annotation_masks(qc, recording)
-    masks["finite"] = np.isfinite(recording.samples)
+    prepared = prepare_recording(recording, config) if prepared is None else prepared
+    if prepared["identity"] != recording_identity(recording) or prepared["corrected"].shape != recording.samples.shape:
+        raise ValueError("Prepared signals do not match the source identity/native grid")
+    decision = saved_polarity_decision(qc, prepared)
+    choice = decision["choice"] if decision else None
+    if prepared["polarity"]["polarity_warning"] and choice is None and not (decision and decision["acknowledged_warning"]):
+        raise ValueError("Polarity warning requires an explicit reviewer choice or acknowledgement in the QC GUI")
+    corrected = apply_polarity(prepared["corrected"], recording.channels, choice)
+    masks.update(prepared["masks"])
+    masks["finite"] = np.isfinite(corrected)
     usable = np.array([qc["channel_ratings"][name] == "usable" for name in recording.channels])
     unknown = np.array(
         [qc["channel_ratings"][name] in {"weak", "unassessed"} for name in recording.channels]
@@ -215,19 +221,30 @@ def preprocess_recording(recording, config, qc_annotations=None):
         "window_samples": smooth_window if smoothing != "none" else None,
         "polyorder": settings["smoothing"]["polyorder"] if smoothing == "savitzky_golay" else None,
     }
-    conditioned = np.empty_like(recording.samples)
-    respiratory_view = np.empty_like(recording.samples)
+    conditioned = np.empty_like(corrected)
+    respiratory_view = np.empty_like(corrected)
     conditioning_support = np.empty_like(masks["finite"])
     respiratory_support = np.empty_like(masks["finite"])
     processors = {}
+    masks["conditioned_interpolated"] = masks["interpolated"].copy()
+    masks["respiratory_interpolated"] = masks["interpolated"].copy()
     for column, name in enumerate(recording.channels):
-        values, eligible = recording.samples[:, column], masks["eligible"][:, column]
+        values, eligible = corrected[:, column], masks["eligible"][:, column]
         if name in BELTS and name in settings["channels"] and selected[column]:
             channel_result = preprocess_belt(values, eligible, detrend_parameters, smoothing_parameters)
             processors[name] = "belt_conditioning"
-        elif name == "SpO2" and selected[column]:
-            channel_result = preprocess_spo2(values, eligible)
-            processors[name] = "spo2_manual_qc_only"
+            dependence = masks["interpolated"][:, column].copy()
+            if detrend != "none":
+                for start, end in continuous_runs(eligible):
+                    if dependence[start:end].any():
+                        dependence[start:end] = True  # Detrending removes a run-wide mean residual.
+            masks["conditioned_interpolated"][:, column] = dependence
+            if smoothing != "none":
+                dependence = maximum_filter1d(dependence.astype(np.uint8), smooth_window, mode="constant", cval=0).astype(bool)
+            masks["respiratory_interpolated"][:, column] = dependence
+        elif name == "SpO2":
+            channel_result = _passthrough_channel(values)
+            processors[name] = "spo2_corrected_without_filtering"
         elif name in {"ECG1", "ECG2"}:
             channel_result = preprocess_ecg(values)
             processors[name] = "ecg_todo_passthrough"
@@ -243,12 +260,14 @@ def preprocess_recording(recording, config, qc_annotations=None):
             conditioning_support[:, column],
             respiratory_support[:, column],
         ) = channel_result
+    masks["conditioned_interpolated"] &= np.isfinite(conditioned)
+    masks["respiratory_interpolated"] &= np.isfinite(respiratory_view)
     masks["conditioning_support"] = conditioning_support
     masks["respiratory_support"] = respiratory_support
     masks["conditioned_valid"] = masks["eligible"] & conditioning_support & np.isfinite(conditioned)
     masks["valid"] = masks["eligible"] & respiratory_support & np.isfinite(respiratory_view)
     provenance = {
-        "algorithm_version": "dbat_conditioning_v2",
+        "algorithm_version": "dbat_conditioning_v3",
         "enabled": settings["enabled"],
         "selected_channels": settings["channels"],
         "qc_channels": config["qc"]["channels"],
@@ -258,12 +277,13 @@ def preprocess_recording(recording, config, qc_annotations=None):
         "edge_policy": "Run-local shrink (moving mean) or interp (SG); full-window margins excluded",
         "short_run_policy": "No window reduction; shorter than configured window => unsupported NaN view",
         "quality_policy": "Only selected QC channels with explicitly inspected support and usable ratings are eligible",
-        "polarity": "supplied_orientation_preserved; no manual or automatic polarity correction in Phase 1",
+        "automatic_cleaning": {"signature": prepared["signature"], **prepared["provenance"]},
+        "polarity": {"assessment": prepared["polarity"], "decision": decision, "applied_to": choice},
         "limitations": [
             "No MATLAB numerical comparison performed",
             "Review coverage may be partial",
             "Weak, unavailable and unassessed channels are ineligible",
-            "No automatic artifact detector; uninspected samples remain unknown",
+            "Automatic candidates are heuristic; interpolation is estimated, not newly inspected evidence",
             "Respiratory smoothing is not a general spectral preprocessing stage",
         ],
         "counts": {
@@ -271,6 +291,6 @@ def preprocess_recording(recording, config, qc_annotations=None):
             for column, name in enumerate(recording.channels)
         },
     }
-    result = PreprocessingResult(recording, conditioned, respiratory_view, masks, qc, provenance)
+    result = PreprocessingResult(recording, corrected, conditioned, respiratory_view, masks, qc, provenance)
     result.resampled, provenance["resampling"] = resample_views(result, settings["resampling"])
     return result
