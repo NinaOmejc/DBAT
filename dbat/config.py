@@ -2,7 +2,7 @@
 
 import hashlib
 import math
-from copy import deepcopy
+import re
 from pathlib import Path
 
 import tomllib
@@ -25,20 +25,17 @@ def window_samples(value, unit, fs_hz):
     return samples
 
 
-def load_config(path, overrides=None, *, explicit_dat=False):
-    """Read and validate grouped settings; apply nested CLI overrides in memory.
+def load_config(path):
+    """Read one grouped TOML and validate selection, paths and scientific settings.
 
-    Relative paths use the TOML directory. An explicit .dat bypasses only the
-    configured input-directory existence check; IO validates that file instead.
-    Returns a dictionary with the resolved configuration path for provenance.
+    Relative paths use the TOML directory. Returns the effective configuration
+    plus the source file path/hash for provenance; no CLI overrides are applied.
     """
     path = Path(path).resolve(strict=True)
     with path.open("rb") as stream:
         config = tomllib.load(stream)
-    for group, changes in (overrides or {}).items():
-        config[group].update(deepcopy(changes))
     try:
-        _validate(config, path.parent, explicit_dat)
+        _validate(config, path.parent)
     except KeyError as error:
         raise ValueError(f"Missing configuration key: {error}; use configs/default.toml") from error
     config["config_path"] = str(path)
@@ -46,8 +43,38 @@ def load_config(path, overrides=None, *, explicit_dat=False):
     return config
 
 
-def _validate(config, directory, explicit_dat):
+def _resolve_path(value, directory):
+    """Resolve a configured path relative to its TOML file's directory."""
+    path = Path(value).expanduser()
+    return str((path if path.is_absolute() else directory / path).resolve())
+
+
+def _validate_selection(selection):
+    """Require unique positive subject/measurement lists and excluded pairs."""
+    for name in ("subjects", "measurements"):
+        values = selection[name]
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(type(value) is not int or value <= 0 for value in values)
+            or len(set(values)) != len(values)
+        ):
+            raise ValueError(f"run.{name} must be a nonempty list of unique positive integers")
+    excluded = selection["exclude_recordings"]
+    if not isinstance(excluded, list) or any(
+        not isinstance(pair, list)
+        or len(pair) != 2
+        or any(type(value) is not int or value <= 0 for value in pair)
+        for pair in excluded
+    ):
+        raise ValueError("run.exclude_recordings must be a list of [subject, measurement] pairs")
+    if len({tuple(pair) for pair in excluded}) != len(excluded):
+        raise ValueError("run.exclude_recordings contains duplicate pairs")
+
+
+def _validate(config, directory):
     """Reject unsupported settings and inconsistent units before loading data."""
+    _validate_selection(config["run"])
     input_config, qc = config["input"], config["qc"]
     preprocessing, output = config["preprocessing"], config["output"]
     fs_hz = input_config["fs_hz"]
@@ -74,14 +101,21 @@ def _validate(config, directory, explicit_dat):
         if Path(filename).name != filename or Path(filename).suffix.lower() != ".dat":
             raise ValueError(f"input.{name} must resolve to a .dat filename without directories")
     for name, value in config["paths"].items():
-        resolved = Path(value).expanduser()
-        if not resolved.is_absolute():
-            resolved = directory / resolved
-        config["paths"][name] = str(resolved.resolve())
+        config["paths"][name] = _resolve_path(value, directory)
     source_dir, output_dir = (Path(config["paths"][name]) for name in ("input_dir", "output_dir"))
-    if not explicit_dat and not source_dir.is_dir():
+    dat_file = input_config["dat_file"]
+    if not isinstance(dat_file, str):
+        raise ValueError("input.dat_file must be a path string, or empty for filename resolution")
+    if dat_file:
+        if len(config["run"]["subjects"]) != 1 or len(config["run"]["measurements"]) != 1:
+            raise ValueError("input.dat_file requires exactly one subject and one measurement")
+        input_config["dat_file"] = _resolve_path(dat_file, directory)
+        explicit_path = Path(input_config["dat_file"])
+        if not explicit_path.is_file() or explicit_path.suffix.lower() != ".dat":
+            raise ValueError(f"input.dat_file must identify an existing .dat file: {explicit_path}")
+    elif not source_dir.is_dir():
         raise ValueError(
-            f"Input directory does not exist: {source_dir}; set paths.input_dir or --dat"
+            f"Input directory does not exist: {source_dir}; set paths.input_dir or input.dat_file"
         )
     if output_dir == source_dir or output_dir.is_relative_to(source_dir):
         raise ValueError("paths.output_dir must be outside paths.input_dir")
@@ -97,6 +131,20 @@ def _validate(config, directory, explicit_dat):
         raise ValueError("qc.initial_rating must be unassessed; ratings require explicit review")
     if not isinstance(qc["reviewer"], str):
         raise ValueError("qc.reviewer must be text")
+    annotation_files = qc["annotation_files"]
+    if not isinstance(annotation_files, dict):
+        raise ValueError("qc.annotation_files must map recording IDs to accepted QC JSON files")
+    for recording_id, filename in annotation_files.items():
+        if (
+            not re.fullmatch(r"Sub[1-9]\d*_M[1-9]\d*", recording_id)
+            or not isinstance(filename, str)
+            or not filename
+        ):
+            raise ValueError("qc.annotation_files needs SubN_MN keys and nonempty JSON paths")
+        resolved = Path(_resolve_path(filename, directory))
+        if not resolved.is_file() or resolved.suffix.lower() != ".json":
+            raise ValueError(f"Accepted QC JSON does not exist: {resolved}")
+        annotation_files[recording_id] = str(resolved)
     if type(qc["max_plot_points"]) is not int or qc["max_plot_points"] < 100:
         raise ValueError("qc.max_plot_points must be an integer >= 100")
     for value, name in [

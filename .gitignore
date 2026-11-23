@@ -17,7 +17,7 @@ dist/
 .env.*
 !.env.example
 
-# Recording data and generated results (normally outside this checkout)
+# Recording data and generated results (local only)
 /outputs/
 /data/
 /raw_data/

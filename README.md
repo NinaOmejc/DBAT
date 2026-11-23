@@ -11,21 +11,20 @@ Public source repository: [NinaOmejc/DBAT](https://github.com/NinaOmejc/DBAT).
 
 ```text
 D:\Experiments\DBAT\
-  DBAT\                  # Git source checkout
-    .git\
-    configs\
-    scripts\
-    dbat\
-  outputs\               # Local results, outside Git
+  .git\
+  dbat\
+  configs\
+  scripts\
+  outputs\               # Ignored by Git and excluded from PyCharm indexing
     preproc_data\
     features\            # Reserved for a later phase
+  venv\                  # Ignored by Git and excluded from PyCharm indexing
 ```
 
-`configs/default.toml` sets `paths.output_dir = "../../outputs/preproc_data"`,
-resolved relative to the configuration file. This gives the sibling results
-directory shown above. The existing preprocessing run was moved there without
-altering its files; its saved provenance retains the original run-time paths.
-The empty `features` directory is local only; feature extraction remains unimplemented.
+`configs/default.toml` sets `paths.output_dir = "../outputs/preproc_data"`,
+resolved relative to the TOML directory. Existing result files remain unchanged;
+their provenance retains the paths used at the time they were produced. The empty
+`outputs/features` directory is local only; feature extraction remains unimplemented.
 
 ## Package layout
 
@@ -51,61 +50,74 @@ repository root through the normal Python search path. Use
 
 ## Development setup
 
-Use Python 3.11+ and an editable installation. From the repository root:
+Use Python 3.11+ and an editable installation from the repository root:
 
 ```powershell
-Set-Location 'D:\Experiments\DBAT\DBAT'
+Set-Location 'D:\Experiments\DBAT'
 # First setup only: skip this line if the environment already exists.
-python -m venv ..\venv
-# Install DBAT and its declared dependencies into the project environment.
-..\venv\Scripts\python.exe -m pip install -e .
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -e .
 ```
 
-In PyCharm, open `D:\Experiments\DBAT\DBAT` as the project and select
-`D:\Experiments\DBAT\venv\Scripts\python.exe` as its interpreter. Ordinary
-`dbat` imports then correspond directly to the `dbat` directory. Changes to Python
-files are available immediately; reinstall after changing dependency/package metadata.
+In PyCharm, open `D:\Experiments\DBAT` and select
+`D:\Experiments\DBAT\venv\Scripts\python.exe` as the interpreter. The local
+project configuration marks `outputs` and `venv` as excluded. For a new PyCharm
+project, right-click each folder and select **Mark Directory As > Excluded**.
+These IDE settings stay local in the Git-ignored `.idea` directory.
 
-## Run a real recording now
+## Configure and run
 
-For one-click development in PyCharm, open `scripts/check_preprocessing.py`,
-edit `example_args` in the `if __name__ == "__main__":` block at the bottom,
-and click Run or Debug with no script parameters. The example selects Sub1/M1,
-opens the QC GUI, and sets the reviewer to Nina. Processing settings still
-come from the TOML configuration. Any supplied command-line arguments replace
-the example entirely. You can also call `main(["--subject", "1",
-"--measurement", "1", "--gui"])` from another Python script.
-
-The checker uses normal package imports. Install DBAT as above before running it.
+All runtime choices live in **`configs/default.toml`**. The script has one optional
+command-line argument, `--config`. Edit the TOML and click Run/Debug without script
+parameters. To choose another file, edit `config_file` at the bottom of
+`scripts/check_preprocessing.py`, or pass `--config`:
 
 ```powershell
-Set-Location 'D:\Experiments\DBAT\DBAT'
-$dbatPython = 'D:\Experiments\DBAT\venv\Scripts\python.exe'
-
-# Native IO, provenance and storage check without new review evidence.
-& $dbatPython .\scripts\check_preprocessing.py --subject 1 --measurement 1 --no-gui
-
-# Review the supplied waveform BEFORE conditioning.
-$env:MPLBACKEND = 'TkAgg'
-& $dbatPython .\scripts\check_preprocessing.py --dat 'D:\Projects\MAGMA\raw_data\ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub1_Pom1_DeTr_Norm.dat' --gui --reviewer 'Nina'
-
-# Reuse a saved review; replace the path with the QC path printed by the GUI run.
-& $dbatPython .\scripts\check_preprocessing.py --subject 1 --measurement 1 --no-gui --qc 'D:\Experiments\DBAT\outputs\preproc_data\Sub1_M1\qc\<printed-version>.json'
+Set-Location 'D:\Experiments\DBAT'
+.\venv\Scripts\python.exe .\scripts\check_preprocessing.py
+# Same entry point with an explicit configuration file:
+.\venv\Scripts\python.exe .\scripts\check_preprocessing.py --config .\configs\default.toml
 ```
 
-The checker does not install packages. Dependency ranges in `pyproject.toml` permit
-an independently provisioned environment; exact runtime versions are saved with results.
+The script's `main(config_file)` loads the settings once and loops over every
+selected subject/measurement combination, matching MATLAB `run_magma.m`:
 
-## Configuration and GUI
+```toml
+[run]
+subjects = [1, 2]
+measurements = [1, 2]
+exclude_recordings = [[2, 1]]
+```
 
-Edit **`configs/default.toml`**: the single grouped runtime configuration, modeled
-on MATLAB's configuration structure. Paths may be absolute or relative to the TOML
-directory. `--config`, `--output-dir`, `--gui`/`--no-gui`, `--reviewer`, `--qc` and
-`--no-preview` override settings in memory. `--dat` bypasses the configured input
-directory check; explicit file existence, shape, identity and filename fs are still
-validated. Arbitrary filenames require `--subject` and `--measurement`. Sampling
-rate and column semantics come from the explicit configuration, since ASCII values
-alone cannot establish them. The filename fs token, when present, must agree.
+This processes Sub1/M1, Sub1/M2 and Sub2/M2. Lists are a Cartesian product, not
+paired by position. The distributed default selects only Sub1/M1. Excluded pairs
+are skipped; cancelling a recording's GUI skips that recording and continues.
+Missing/malformed input or processing errors stop the run with an actionable error.
+Every completed recording uses the same package preprocessing functions and gets
+its own versioned result and round-trip verification.
+
+Set **`qc.open_gui = true`** or **`false`** in TOML; no paired GUI command-line flags
+are needed. Reviewer, viewing window, preview saving and scientific methods are
+also configured there. For debugging from another Python script, call
+`main(Path("D:/Experiments/DBAT/configs/default.toml"))` after importing this script's
+`main` function.
+
+Configured filenames are resolved for each pair. To inspect an explicitly named
+`.dat`, set `input.dat_file` and select exactly one subject and one measurement;
+identity, filename fs and column layout are still validated. To reuse accepted QC
+without repeating a review, put the recording's JSON path in the same TOML:
+
+```toml
+[qc.annotation_files]
+Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"
+```
+
+Paths are relative to the TOML file unless absolute. QC files can also be a previous
+run's `summary.json`; schema, source hash, fs, native grid and channel identity must
+match. Missing map entries remain explicitly unreviewed. The checker does not
+install packages; exact runtime versions are saved with each result.
+
+## Manual QC GUI
 
 - All six channels share native time. Slider, Previous/Next and zoom buttons move
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
@@ -150,9 +162,9 @@ automated artifact detection, interpolation and polarity correction are not incl
 
 Actual conditioning only operates within continuous finite, explicitly inspected,
 non-artifact runs on channels explicitly rated **usable**. Weak/unassessed channels
-remain uncertain; unavailable channels are excluded. No-GUI without prior QC leaves
-zero eligible samples and defers selected smoothing/detrending. This is a useful
-import/storage check, not a completed preprocessing review. Pass `--qc` to reuse
+remain uncertain; unavailable channels are excluded. With `qc.open_gui = false` and no prior QC, there are
+zero eligible samples and selected smoothing/detrending is deferred. This is a useful
+import/storage check, not a completed preprocessing review. Use `qc.annotation_files` to reuse
 accepted evidence without a GUI. Unselected channels pass through unchanged.
 
 Moving means shrink at run endpoints; SG uses `mode='interp'`. Derived edge values
@@ -165,10 +177,10 @@ support rules, not clinical validation or a MATLAB numerical-equivalence claim.
 
 ## Outputs and manual verification
 
-Every run uses a new `../outputs/preproc_data/SubN_MM/runs/<UTC-version>/`
+Every run uses a new `outputs/preproc_data/SubN_MM/runs/<UTC-version>/`
 directory. Accepted QC also has a separately versioned JSON under
-`../outputs/preproc_data/SubN_MM/qc/`, reusable via
-`--qc`; no previous result, accepted review, `.dat`, MATLAB `.mat` or HDF5 is replaced.
+`outputs/preproc_data/SubN_MM/qc/`, reusable via
+`qc.annotation_files`; no previous result, accepted review, `.dat`, MATLAB `.mat` or HDF5 is replaced.
 A failure during writing leaves a `.partial` directory rather than a published run.
 
 `SubN_MM_preprocessing.h5` has schema **`dbat_preprocessing_v1`**:
@@ -198,12 +210,12 @@ rendered on that recording and a launched interactive session closed without
 saving. Moving-mean endpoint/interior arithmetic and all three conditioning methods
 were checked on real-data segments. Live desktop capture was unreliable, so full
 mouse-driven annotation, rating and Save workflows still need user inspection.
-No MATLAB execution/comparison, package installation or automated tests were run.
+No MATLAB execution/comparison or automated tests were run during that initial check.
 
 Inspect the most recent output after a successful run:
 
 ```powershell
-$dbatRun = Get-ChildItem ..\outputs\preproc_data\Sub1_M1\runs -Directory |
+$dbatRun = Get-ChildItem .\outputs\preproc_data\Sub1_M1\runs -Directory |
     Where-Object { $_.Name -notlike '*.partial' } |
     Sort-Object Name | Select-Object -Last 1
 Get-Content -LiteralPath (Join-Path $dbatRun.FullName 'summary.json')
@@ -228,6 +240,7 @@ Historical five-minute/generated QC is not treated as ground truth. All recordin
 still need their own explicit initial DBAT QC.
 
 Sources: [MATLAB defaults](https://github.com/NinaOmejc/magma-labeling/blob/main/src/get_config_defaults.m),
+[subject/measurement loop](https://github.com/NinaOmejc/magma-labeling/blob/main/src/run_magma.m),
 [native IO](https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/load_raw_data.m),
 [preprocessing](https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/preprocess_data.m),
 [respiratory smoothing](https://github.com/NinaOmejc/magma-labeling/blob/main/src/feature_extraction/extract_respiration_feature.m),

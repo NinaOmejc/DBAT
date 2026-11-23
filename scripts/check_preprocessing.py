@@ -1,15 +1,13 @@
-"""Manually inspect ONE real .dat through DBAT's actual Phase-1 package path.
+"""Manually inspect real recordings selected in one grouped DBAT configuration.
 
-Run from any directory, e.g.:
-    python scripts/check_preprocessing.py --subject 33 --measurement 1 --gui
-With no arguments, uses the editable example in the __main__ block.
-Writes a versioned HDF5/JSON result and optional preview; validates its round trip.
-No synthetic recordings, automated test suite or separate preprocessing pipeline.
+Run directly in PyCharm or use:
+    python scripts/check_preprocessing.py --config configs/default.toml
+Processes every selected subject/measurement pair, skipping explicit exclusions.
+Writes versioned HDF5/JSON results and optional previews, then checks each round trip.
 """
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import h5py
@@ -93,52 +91,19 @@ def verify_saved_result(path, result):
     return summary
 
 
-def main(argv=None):
-    """Check one recording using an argument list, or command-line arguments.
+def check_recording(config, subject, measurement):
+    """Load, review, condition and verify one recording; return its HDF5 path.
 
-    Parameters
-    ----------
-    argv : list[str], optional
-        CLI-style arguments; None reads the process command line.
+    Cancel returns None and leaves existing results and accepted QC untouched.
+    All processing goes through the same DBAT package functions as a single run.
     """
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument(
-        "--dat", type=Path, help="Explicit numeric .dat; identity checked against its filename"
-    )
-    parser.add_argument("--subject", type=int)
-    parser.add_argument("--measurement", type=int)
-    parser.add_argument("--config", type=Path, default=REPOSITORY / "configs" / "default.toml")
-    parser.add_argument("--output-dir", type=Path)
-    parser.add_argument(
-        "--qc", type=Path, help="Accepted DBAT QC JSON or previous run's summary.json"
-    )
-    parser.add_argument("--reviewer", help="Reviewer identity used by the manual GUI")
-    gui = parser.add_mutually_exclusive_group()
-    gui.add_argument("--gui", dest="gui", action="store_true")
-    gui.add_argument("--no-gui", dest="gui", action="store_false")
-    parser.set_defaults(gui=None)
-    parser.add_argument(
-        "--no-preview", action="store_true", help="Skip the optional static inspection image"
-    )
-    args = parser.parse_args(argv)
-    overrides = {"paths": {}, "qc": {}, "output": {}}
-    if args.output_dir is not None:
-        overrides["paths"]["output_dir"] = str(args.output_dir.resolve())
-    if args.gui is not None:
-        overrides["qc"]["open_gui"] = args.gui
-    if args.reviewer is not None:
-        overrides["qc"]["reviewer"] = args.reviewer
-    if args.no_preview:
-        overrides["output"]["save_preview"] = False
-    config = load_config(args.config, overrides, explicit_dat=args.dat is not None)
     recording = load_dat_recording(
-        config, args.dat, subject=args.subject, measurement=args.measurement
+        config, config["input"]["dat_file"] or None, subject=subject, measurement=measurement
     )
+    qc_file = config["qc"]["annotation_files"].get(recording.recording_id)
     qc = (
-        load_qc_annotations(args.qc, recording)
-        if args.qc
+        load_qc_annotations(qc_file, recording)
+        if qc_file
         else new_qc_annotations(recording, config["qc"]["reviewer"])
     )
     if config["qc"]["open_gui"]:
@@ -147,9 +112,9 @@ def main(argv=None):
         qc = run_qc_gui(recording, config, qc)
         if qc is None:
             print(
-                "Cancelled: no new QC or preprocessing result saved; existing accepted reviews unchanged."
+                f"Cancelled {recording.recording_id}: no new files saved; continuing to the next recording."
             )
-            return
+            return None
         qc_path = save_qc_annotations(qc, recording, config["paths"]["output_dir"])
         print(f"Accepted QC saved before conditioning: {qc_path}")
     result = preprocess_recording(recording, config, qc)
@@ -177,15 +142,49 @@ def main(argv=None):
     print(
         f"Output: {path}\nMetadata/QA: {path.parent / 'summary.json'} | {path.parent / 'validation.json'}"
     )
+    return path
+
+
+def main(config_file):
+    """Run Phase 1 for the configured subject/measurement Cartesian product.
+
+    Parameters
+    ----------
+    config_file : path-like
+        Grouped TOML containing selection, paths, QC and processing settings.
+
+    Returns
+    -------
+    list of Path
+        Completed HDF5 outputs. Excluded and GUI-cancelled recordings are skipped;
+        input or processing errors stop the run with the original error.
+    """
+    config = load_config(config_file)
+    selection = config["run"]
+    excluded = {tuple(pair) for pair in selection["exclude_recordings"]}
+    outputs = []
+    # Same selection convention as MATLAB run_magma.m: all combinations, not zip.
+    # https://github.com/NinaOmejc/magma-labeling/blob/main/src/run_magma.m
+    for subject in selection["subjects"]:
+        for measurement in selection["measurements"]:
+            if (subject, measurement) in excluded:
+                print(f"Skipping excluded Sub{subject}_M{measurement}")
+                continue
+            print(f"Processing Sub{subject}_M{measurement}")
+            output = check_recording(config, subject, measurement)
+            if output is not None:
+                outputs.append(output)
+    print(f"Completed {len(outputs)} recording(s).")
+    return outputs
 
 
 if __name__ == "__main__":
-    # Edit this example, then click Run/Debug without script parameters.
-    example_args = [
-        "--subject", "1",
-        "--measurement", "1",
-        "--gui",
-        "--reviewer", "Nina",
-    ]
-    # Explicit command-line arguments replace the example.
-    main(sys.argv[1:] or example_args)
+    # Edit this one path, then click Run/Debug without script parameters.
+    config_file = REPOSITORY / "configs" / "default.toml"
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--config", type=Path, default=config_file, help="Grouped DBAT TOML configuration"
+    )
+    main(parser.parse_args().config)

@@ -1,10 +1,18 @@
 # Paths relative to this file are resolved from this file's directory.
 [paths]
 input_dir = "D:/Projects/MAGMA/raw_data"
-# Sibling local outputs, outside the source checkout.
-output_dir = "../../outputs/preproc_data"
+# Local results are ignored by Git and excluded from PyCharm indexing.
+output_dir = "../outputs/preproc_data"
+
+[run]
+subjects = [1]
+measurements = [1]
+# Skip only these [subject, measurement] pairs, e.g. [[3, 1], [5, 2]].
+exclude_recordings = []
 
 [input]
+# Optional explicit .dat path; use with one subject and one measurement.
+dat_file = ""
 fs_hz = 200.0
 # Explicit ASCII column order; DBAT never guesses or transposes columns.
 channels = ["ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm"]
@@ -17,9 +25,13 @@ window_length = 600.0
 window_unit = "seconds"  # Or "samples"; 600 samples at 200 Hz is 3 s.
 shared_belt_scale = true
 artifact_scope = "both_belts"  # Or "selected_channel": drag on that channel's plot.
-reviewer = ""  # May also be entered in the GUI or with --reviewer.
+reviewer = "NO"  # May also be entered in the GUI.
 initial_rating = "unassessed"
 max_plot_points = 5000  # Drawing only; annotation indices stay on the native grid.
+
+[qc.annotation_files]
+# Optional accepted DBAT QC JSON per recording; paths are relative to this TOML.
+# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"
 
 [preprocessing]
 enabled = true

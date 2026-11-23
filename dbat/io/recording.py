@@ -76,7 +76,7 @@ def load_dat_recording(config, dat_path=None, *, subject=None, measurement=None)
             raise ValueError(f"{name} must be a positive integer")
     if dat_path is None:
         if subject is None or measurement is None:
-            raise ValueError("Supply --dat or both --subject and --measurement")
+            raise ValueError("Provide dat_path or both subject and measurement")
         candidates = [
             Path(config["paths"]["input_dir"])
             / config["input"][key].format(subject=subject, measurement=measurement)
@@ -100,9 +100,7 @@ def load_dat_recording(config, dat_path=None, *, subject=None, measurement=None)
             raise ValueError("Explicit subject/measurement disagrees with the .dat filename")
         subject, measurement = parsed_subject, parsed_measurement
     if subject is None or measurement is None or subject <= 0 or measurement <= 0:
-        raise ValueError(
-            "Filename lacks valid SubN_PomM identity; supply --subject and --measurement"
-        )
+        raise ValueError("Filename lacks valid SubN_PomM identity; provide subject and measurement")
     fs_hz = float(config["input"]["fs_hz"])
     fs_match = re.search(r"(?:^|_)fs(\d+(?:\.\d+)?)(?:_|$)", path.stem, re.IGNORECASE)
     if fs_match and float(fs_match.group(1)) != fs_hz:
