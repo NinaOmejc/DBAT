@@ -1,64 +1,65 @@
-# Paths relative to this file are resolved from this file's directory.
+# Input and output directories (relative paths use this TOML file's directory)
 [paths]
-input_dir = "D:/Projects/MAGMA/raw_data"
-# Local results are ignored by Git and excluded from PyCharm indexing.
-output_dir = "../outputs/preproc_data"
+input_dir = "D:/Projects/MAGMA/raw_data"  # Directory containing the supplied MAGMA .dat recordings.
+output_dir = "../outputs/preproc_data"  # Local preprocessing results; ignored by Git and excluded from PyCharm indexing.
 
+# Recording selection and console output
 [run]
-# 0 = silent, 1 = high-level progress, 2 = detailed recording/QC summary.
-verbosity = 1
-subjects = [1]
-measurements = [1]
-# Skip only these [subject, measurement] pairs, e.g. [[3, 1], [5, 2]].
-exclude_recordings = []
+verbosity = 1  # 0 = silent, 1 = high-level progress (default), 2 = detailed recording/QC summary.
+subjects = [1]  # Subject IDs to process.
+measurements = [1]  # Measurement IDs; every subject is paired with every measurement.
+exclude_recordings = []  # Skip [subject, measurement] pairs, e.g. [[3, 1], [5, 2]].
 
+# Supplied recording format and filename resolution
 [input]
-# Optional explicit .dat path; use with one subject and one measurement.
-dat_file = ""
-fs_hz = 200.0
-# Explicit ASCII column order; DBAT never guesses or transposes columns.
-channels = ["ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm"]
-filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm.dat"
-alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm_Glue.dat"
+dat_file = ""  # Optional explicit .dat path; empty uses filename patterns; requires one subject/measurement pair.
+fs_hz = 200.0  # Native sampling frequency in Hz.
+channels = ["ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm"]  # Exact ASCII column order; no guessing or transposing.
+filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm.dat"  # Primary filename with subject/measurement placeholders.
+alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm_Glue.dat"  # Fallback filename when the primary is absent; empty disables it.
 
+# Initial manual technical quality control
 [qc]
-open_gui = true
-window_length = 600.0
-window_unit = "seconds"  # Or "samples"; 600 samples at 200 Hz is 3 s.
-shared_belt_scale = true
-artifact_scope = "both_belts"  # Or "selected_channel": drag on that channel's plot.
-reviewer = "NO"  # May also be entered in the GUI.
-initial_rating = "unassessed"
-max_plot_points = 5000  # Drawing only; annotation indices stay on the native grid.
+open_gui = true  # Open the manual QC editor before conditioning; false adds no new manual review evidence.
+window_length = 600.0  # Initial visible window length, expressed in window_unit.
+window_unit = "seconds"  # seconds | samples; 600 samples at 200 Hz is 3 seconds.
+shared_belt_scale = true  # Initially display both respiratory belts on a common amplitude scale.
+artifact_scope = "both_belts"  # both_belts | selected_channel; the latter marks only the dragged subplot's channel.
+reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
+initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
+max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing always uses native samples.
 
+# Optional accepted QC files, keyed by recording ID
 [qc.annotation_files]
-# Optional accepted DBAT QC JSON per recording; paths are relative to this TOML.
-# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"
+# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Accepted QC or summary JSON; path relative to this TOML.
 
+# Signal conditioning eligibility
 [preprocessing]
-enabled = true
-channels = ["Resp-Lungs", "Resp-Diaphragm"]
-# Conditioning requires explicitly reviewed support AND a usable channel rating.
-# No automatic artifact detection, interpolation, normalization or polarity flip.
+enabled = true  # Enable configured conditioning within finite, reviewed, non-artifact runs on usable channels.
+channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Channels eligible for conditioning; other channels pass through unchanged.
 
+# Smoothing of the respiratory extraction view
 [preprocessing.smoothing]
-method = "moving_mean"  # none | moving_mean | savitzky_golay
-window_sec = 0.25  # MATLAB default: round(0.25 * 200) = 50 samples.
-sg_window = 51.0  # Must resolve to an odd number of samples; never rounded to odd.
-sg_window_unit = "samples"  # seconds also supported, e.g. 0.255 at 200 Hz.
-polyorder = 3
+method = "moving_mean"  # none | moving_mean | savitzky_golay; respiratory view only, not universal spectral preprocessing.
+window_sec = 0.25  # Moving-mean window in seconds; MATLAB default gives 50 samples at 200 Hz.
+sg_window = 51.0  # Savitzky-Golay window in sg_window_unit; must resolve to an odd number of samples.
+sg_window_unit = "samples"  # samples | seconds; 0.255 seconds at 200 Hz gives 51 samples.
+polyorder = 3  # Savitzky-Golay polynomial degree; must be nonnegative and smaller than its window in samples.
 
+# Optional slow-drift detrending
 [preprocessing.detrend]
-method = "none"  # none | moving_detrend; hpfilter intentionally not implemented.
-window_sec = 60.0  # MATLAB get_config_defaults.m; effective odd window recorded.
+method = "none"  # none | moving_detrend; no hpfilter; none avoids repeating external DeTr_Norm preprocessing.
+window_sec = 60.0  # Moving-detrend window in seconds (MATLAB default); effective odd sample length is recorded.
 
+# Technical artifact handling
 [preprocessing.artifacts]
-automatic_detection = false  # No guessed technical-artifact thresholds.
+automatic_detection = false  # Manual annotations are authoritative; automatic detection is unvalidated and must remain false.
 
+# Versioned output files and inspection preview
 [output]
-schema_version = "dbat_preprocessing_v1"
-overwrite = false  # Only immutable versioned saves are supported.
-filename = "{recording_id}_preprocessing.h5"
-save_preview = true
-preview_start_sec = 0.0
-preview_duration_sec = 60.0
+schema_version = "dbat_preprocessing_v1"  # Native DBAT result schema identifier; keep this version unchanged.
+overwrite = false  # Existing outputs are preserved through immutable versioned runs; must remain false.
+filename = "{recording_id}_preprocessing.h5"  # HDF5 filename; recording_id expands to SubN_MN.
+save_preview = true  # Save an original/conditioned waveform inspection PNG for each recording.
+preview_start_sec = 0.0  # Inspection preview start time in seconds from the recording's native zero origin.
+preview_duration_sec = 60.0  # Inspection preview duration in seconds.
