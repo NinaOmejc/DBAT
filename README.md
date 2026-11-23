@@ -15,7 +15,7 @@ D:\Experiments\DBAT\
     .git\
     configs\
     scripts\
-    src\
+    dbat\
   outputs\               # Local results, outside Git
     preproc_data\
     features\            # Reserved for a later phase
@@ -27,10 +27,10 @@ directory shown above. The existing preprocessing run was moved there without
 altering its files; its saved provenance retains the original run-time paths.
 The empty `features` directory is local only; feature extraction remains unimplemented.
 
-## Source layout
+## Package layout
 
 ```text
-src/
+dbat/
   __init__.py
   config.py
   io/
@@ -43,21 +43,36 @@ src/
     qc_gui.py
 ```
 
-There is no nested `src/dbat` directory. Setuptools maps `dbat` directly to
-`src`, retaining the public import name. For example, use
+This standard flat layout places the `dbat` package directly in the repository.
+The package folder matches the import name. Editable installation exposes the
+repository root through the normal Python search path. Use
 `from dbat.io.recording import load_dat_recording` and
-`from dbat.preprocessing.pipeline import preprocess_recording` after installation.
+`from dbat.preprocessing.pipeline import preprocess_recording`.
 
-## Run a real recording now
+## Development setup
 
-The existing MAGMA-ml interpreter already provides NumPy 2.2.6, SciPy 1.15.3,
-Matplotlib 3.11.2 and h5py 3.16.0. These commands do not install packages or import
-MAGMA code. The checker loads the flat `src` directory as the `dbat` package,
-without requiring an installation.
+Use Python 3.11+ and an editable installation. From the repository root:
 
 ```powershell
 Set-Location 'D:\Experiments\DBAT\DBAT'
-$dbatPython = 'D:\Projects\MAGMA\MAGMA-ml\.venv\Scripts\python.exe'
+# First setup only: skip this line if the environment already exists.
+python -m venv ..\venv
+# Install DBAT and its declared dependencies into the project environment.
+..\venv\Scripts\python.exe -m pip install -e .
+```
+
+In PyCharm, open `D:\Experiments\DBAT\DBAT` as the project and select
+`D:\Experiments\DBAT\venv\Scripts\python.exe` as its interpreter. Ordinary
+`dbat` imports then correspond directly to the `dbat` directory. Changes to Python
+files are available immediately; reinstall after changing dependency/package metadata.
+
+## Run a real recording now
+
+The checker uses normal package imports. Install DBAT as above before running it.
+
+```powershell
+Set-Location 'D:\Experiments\DBAT\DBAT'
+$dbatPython = 'D:\Experiments\DBAT\venv\Scripts\python.exe'
 
 # Native IO, provenance and storage check without new review evidence.
 & $dbatPython .\scripts\check_preprocessing.py --subject 1 --measurement 1 --no-gui
@@ -70,20 +85,8 @@ $env:MPLBACKEND = 'TkAgg'
 & $dbatPython .\scripts\check_preprocessing.py --subject 1 --measurement 1 --no-gui --qc 'D:\Experiments\DBAT\outputs\preproc_data\Sub1_M1\qc\<printed-version>.json'
 ```
 
-For a separate environment, after approving installation of the four declared
-dependencies (and setuptools build support), use:
-
-```powershell
-Set-Location 'D:\Experiments\DBAT\DBAT'
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-python .\scripts\check_preprocessing.py --subject 1 --measurement 1 --gui --reviewer 'Nina'
-```
-
-No package installation is performed by DBAT. Dependency ranges in `pyproject.toml`
-permit a future independently provisioned environment; the exact runtime versions
-are stored in every result. No dependency security audit or fresh install is claimed.
+The checker does not install packages. Dependency ranges in `pyproject.toml` permit
+an independently provisioned environment; exact runtime versions are saved with results.
 
 ## Configuration and GUI
 

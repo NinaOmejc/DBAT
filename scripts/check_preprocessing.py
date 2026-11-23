@@ -7,20 +7,11 @@ No synthetic recordings, automated test suite or separate preprocessing pipeline
 """
 
 import argparse
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import h5py
 import numpy as np
-
-REPOSITORY = Path(__file__).resolve().parents[1]
-# Load the flat source directory under its public package name without installation.
-package_spec = importlib.util.spec_from_file_location("dbat", REPOSITORY / "src" / "__init__.py")
-package = importlib.util.module_from_spec(package_spec)
-sys.modules["dbat"] = package
-package_spec.loader.exec_module(package)
 
 from dbat.config import load_config
 from dbat.io.recording import (
@@ -36,6 +27,8 @@ from dbat.preprocessing.annotations import (
     validate_qc_annotations,
 )
 from dbat.preprocessing.pipeline import preprocess_recording
+
+REPOSITORY = Path(__file__).resolve().parents[1]
 
 
 def verify_saved_result(path, result):

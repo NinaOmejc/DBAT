@@ -16,5 +16,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["dbat", "dbat.io", "dbat.preprocessing"]
-package-dir = { dbat = "src" }
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+include = ["dbat", "dbat.*"]
