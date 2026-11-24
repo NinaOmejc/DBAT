@@ -3,8 +3,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
-from scipy.signal import savgol_filter
+from scipy.ndimage import minimum_filter1d
 
 from ..config import BELTS, window_samples
 from ..io.recording import Recording
@@ -14,6 +13,7 @@ from .cleaning import clean_recording, preprocess_spo2 as preprocess_spo2
 from .filtering import filter_belt
 from .polarity import apply_polarity, assess_relative_belt_polarity, saved_polarity_decision
 from .resampling import resample_preprocessed
+from .smoothing import moving_mean, smooth_belt
 
 
 @dataclass
@@ -91,38 +91,6 @@ def prepare_recording(recording, config):
     return prepared
 
 
-def moving_mean(values, window):
-    """Compute MATLAB-centered means with shrinking endpoints on a finite run.
-
-    An even window uses window//2 earlier and window//2-1 later samples.
-    Independently implemented using SciPy's uniform filter and support weights:
-    https://www.mathworks.com/help/matlab/ref/movmean.html
-    This matches the finite-input smoothdata(..., 'movmean', window) convention;
-    no MATLAB numerical equivalence is claimed without a real MATLAB comparison.
-    """
-    means = uniform_filter1d(values, size=window, mode="constant", cval=0.0)
-    weights = uniform_filter1d(np.ones(values.size), size=window, mode="constant", cval=0.0)
-    return means / weights
-
-
-def _window_influence(flagged, finite, window, method):
-    """Map flagged input samples to actual moving-mean/SG calculation windows.
-
-    Natural recording endpoints shrink (mean) or shift (SG) without inventing
-    missing support. Internal gaps remain flagged through the nominal window.
-    """
-    influence = maximum_filter1d(flagged.astype(np.uint8), window, mode="constant", cval=0).astype(
-        bool
-    )
-    if method == "savitzky_golay" and window > 1:
-        margin = window // 2
-        for start, end in continuous_runs(finite):
-            if end - start >= window:
-                influence[start : start + margin] |= flagged[start : start + window].any()
-                influence[end - margin : end] |= flagged[end - window : end].any()
-    return influence
-
-
 def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
     """Detrend/filter a native belt independently of ratings and reviewed coverage.
 
@@ -173,42 +141,6 @@ def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
         output, allowed, influence, fs_hz, filtering
     )
     return output, support & filter_support, influence, filter_details, skips
-
-
-def _smooth_belt(values, support, eligible, interpolated, parameters):
-    """Smooth finite processed runs once, retaining ordinary boundary support.
-
-    Returns values, support, valid, interpolation influence and skipped SG runs.
-    Moving means shrink even for short runs. Genuine missing samples stay missing;
-    neighbouring incomplete support is invalid, never converted into artificial NaNs.
-    """
-    finite = np.isfinite(values)
-    method, window = parameters["method"], parameters["window_samples"]
-    output = values.copy()
-    skips = []
-    if method == "none":
-        return output, support.copy(), eligible & support, interpolated.copy(), skips
-    numeric_support = support.copy()
-    for start, end in continuous_runs(finite):
-        run = values[start:end]
-        if method == "savitzky_golay":
-            if len(run) < window:
-                numeric_support[start:end] = False
-                skips.append(
-                    {
-                        "start_sample": int(start),
-                        "end_sample": int(end),
-                        "reason": "shorter_than_savitzky_golay_window",
-                    }
-                )
-                continue
-            output[start:end] = savgol_filter(run, window, parameters["polyorder"], mode="interp")
-        else:
-            output[start:end] = moving_mean(run, window)
-    numeric_support &= finite & ~_window_influence(~support, finite, window, method)
-    valid = numeric_support & eligible & ~_window_influence(~eligible, finite, window, method)
-    influence = _window_influence(interpolated, finite, window, method) & finite
-    return output, numeric_support, valid, influence, skips
 
 
 def preprocess_ecg(values):
@@ -362,7 +294,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
                 masks["valid"][:, column],
                 masks["smoothed_interpolated"][:, column],
                 skips,
-            ) = _smooth_belt(
+            ) = smooth_belt(
                 preprocessed[:, column],
                 masks["preprocessed_support"][:, column],
                 masks["eligible"][:, column],
