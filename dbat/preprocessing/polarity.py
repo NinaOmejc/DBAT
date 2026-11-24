@@ -182,3 +182,23 @@ def assessment_text(assessment):
         if assessment["polarity_warning"]
         else ""
     )
+
+
+def orient_prepared(prepared, qc, channels):
+    """Validate the saved polarity decision and orient a fresh corrected copy.
+
+    Returns oriented samples and the unchanged decision (or None). Warnings
+    still require an explicit reviewer choice or acknowledgement.
+    """
+    decision = saved_polarity_decision(qc, prepared)
+    choice = decision["choice"] if decision else None
+    if (
+        prepared["polarity"]["polarity_warning"]
+        and choice is None
+        and not (decision and decision["acknowledged_warning"])
+    ):
+        raise ValueError(
+            "Polarity warning requires an explicit reviewer choice or acknowledgement in the QC GUI"
+        )
+    corrected = apply_polarity(prepared["corrected"], channels, choice)
+    return corrected, decision

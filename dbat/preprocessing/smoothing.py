@@ -4,6 +4,7 @@ import numpy as np
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
 from scipy.signal import savgol_filter
 
+from ..config import window_samples
 from .annotations import continuous_runs
 
 
@@ -85,3 +86,66 @@ def smooth_belt(values, support, eligible, interpolated, parameters):
     valid = numeric_support & eligible & ~_window_influence(~eligible, finite, window, method)
     influence = _window_influence(interpolated, finite, window, method) & finite
     return output, numeric_support, valid, influence, skips
+
+
+def smooth_recording(preprocessed, recording, processed_fs, settings, masks, diagnostics):
+    """Smooth selected processed-grid belts once, updating masks and diagnostics.
+
+    Parameters
+    ----------
+    preprocessed : ndarray, shape (processed_samples, channels)
+        Native-conditioned, optionally resampled signals; left unchanged.
+    recording : Recording
+        Channel order; processed_fs is the actual smoothing rate in Hz.
+    processed_fs : float
+        Sampling frequency after optional primary resampling.
+    settings : dict
+        Existing preprocessing/smoothing settings.
+    masks, diagnostics : dict
+        Updated in place with smoothing support, influence and skipped runs.
+
+    Returns
+    -------
+    ndarray
+        Smoothed values with the original shape, channel selection and timing.
+    """
+    processors = diagnostics["channel_processors"]
+    processing_skips = diagnostics["processing_skips"]
+    smoothing = settings["smoothing"]["method"] if settings["enabled"] else "none"
+    smooth_window = window_samples(settings["smoothing"]["window_sec"], "seconds", processed_fs)
+    if smoothing == "savitzky_golay":
+        smooth_window = window_samples(
+            settings["smoothing"]["sg_window"],
+            settings["smoothing"]["sg_window_unit"],
+            processed_fs,
+        )
+    smoothing_parameters = {
+        "method": smoothing,
+        "fs_hz": processed_fs,
+        "window_samples": smooth_window if smoothing != "none" else None,
+        "polyorder": settings["smoothing"]["polyorder"] if smoothing == "savitzky_golay" else None,
+        "passes": 1 if smoothing != "none" else 0,
+    }
+    smoothed = preprocessed.copy()
+    masks["smoothed_support"] = masks["preprocessed_support"].copy()
+    masks["smoothed_interpolated"] = masks["preprocessed_interpolated"].copy()
+    masks["valid"] = masks["preprocessed_valid"].copy()
+    for column, name in enumerate(recording.channels):
+        if processors[name] == "belt_conditioning":
+            (
+                smoothed[:, column],
+                masks["smoothed_support"][:, column],
+                masks["valid"][:, column],
+                masks["smoothed_interpolated"][:, column],
+                skips,
+            ) = smooth_belt(
+                preprocessed[:, column],
+                masks["preprocessed_support"][:, column],
+                masks["eligible"][:, column],
+                masks["preprocessed_interpolated"][:, column],
+                smoothing_parameters,
+            )
+            processing_skips[name]["smoothing_processed_grid"] = skips
+    masks["finite"] = np.isfinite(preprocessed) & np.isfinite(smoothed)
+    diagnostics["smoothing"] = smoothing_parameters
+    return smoothed

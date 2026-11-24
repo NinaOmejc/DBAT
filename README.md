@@ -42,6 +42,7 @@ dbat/
     annotations.py
     cleaning.py
     pipeline.py
+    detrending.py
     filtering.py
     polarity.py
     resampling.py
@@ -57,6 +58,14 @@ The package folder matches the import name. Editable installation exposes the
 repository root through the normal Python search path. Use
 `from dbat.io.recording import load_dat_recording` and
 `from dbat.preprocessing.pipeline import preprocess_recording`.
+
+`preprocessing/pipeline.py` orchestrates automatic correction, accepted polarity,
+QC masks, per-belt native detrending/filtering, optional resampling and one
+processed-grid smoothing pass. Stage parameters, channel loops, support masks and
+diagnostics live in `detrending.py`, `filtering.py` and `smoothing.py`. Recording
+metadata assembly stays with IO. Existing pipeline entry points remain available
+through compatibility imports; the result class, numerical order, provenance
+values and HDF5 format are unchanged.
 
 ## Stage checks and respiratory peak detection
 

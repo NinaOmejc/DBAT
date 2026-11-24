@@ -3,7 +3,10 @@
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
+from ..config import BELTS
 from .annotations import continuous_runs
+from .cleaning import preprocess_bp, preprocess_ecg
+from .detrending import detrend_belt, detrending_parameters
 
 
 def filter_belt(values, allowed, interpolated, fs_hz, settings):
@@ -85,3 +88,102 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
             "and exclude reflection guards only at recording ends or genuine missing gaps"
         )
     return output, support, influence, provenance
+
+
+def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
+    """Detrend/filter a native belt independently of ratings and reviewed coverage.
+
+    Parameters
+    ----------
+    values : ndarray, shape (native_samples,)
+        Corrected, polarity-oriented input, never modified.
+    artifact, interpolated : ndarray of bool
+        Confirmed native artifacts and automatic interpolation influence.
+    fs_hz : float
+        Native sampling rate in Hz.
+    detrend, filtering : dict
+        Detrend parameters and separate Butterworth high/low-pass settings.
+
+    Returns
+    -------
+    tuple
+        Numerical values, support, interpolation influence, filter provenance,
+        and skipped detrend runs. Detrending splits at gaps/artifacts; filtering
+        follows each finite waveform across QC flags. Ratings do not split either.
+    """
+    output, allowed, support, influence, skips = detrend_belt(
+        values, artifact, interpolated, detrend
+    )
+    output, filter_support, influence, filter_details = filter_belt(
+        output, allowed, influence, fs_hz, filtering
+    )
+    return output, support & filter_support, influence, filter_details, skips
+
+
+def detrend_and_filter_recording(corrected, recording, settings, masks):
+    """Apply native belt conditioning in the original per-channel order.
+
+    Parameters
+    ----------
+    corrected : ndarray, shape (native_samples, channels)
+        Corrected, oriented signals; left unchanged.
+    recording : Recording
+        Native channel order and sampling frequency in Hz.
+    settings : dict
+        Existing preprocessing settings, including enabled and selected channels.
+    masks : dict of ndarray
+        Native masks; preprocessing support/influence/validity are added in place.
+
+    Returns
+    -------
+    tuple
+        Preprocessed values and the original native-stage diagnostics. Each
+        selected belt is detrended, high-pass filtered and low-pass filtered
+        before advancing to the next channel. Other channels pass through.
+    """
+    detrend_parameters = detrending_parameters(settings, recording.fs_hz)
+    filtering = {
+        name: {**options, "enabled": options["enabled"] and settings["enabled"]}
+        for name, options in settings["filtering"].items()
+    }
+    preprocessed = corrected.copy()
+    masks["preprocessed_support"] = masks["finite"] & ~masks["artifact"]
+    masks["preprocessed_interpolated"] = masks["interpolated"].copy()
+    processors, filter_details, processing_skips = {}, {}, {}
+    for column, name in enumerate(recording.channels):
+        if name in BELTS and name in settings["channels"]:
+            (
+                preprocessed[:, column],
+                masks["preprocessed_support"][:, column],
+                masks["preprocessed_interpolated"][:, column],
+                filter_details[name],
+                skips,
+            ) = preprocess_belt(
+                corrected[:, column],
+                masks["artifact"][:, column],
+                masks["interpolated"][:, column],
+                recording.fs_hz,
+                detrend_parameters,
+                filtering,
+            )
+            processors[name] = "belt_conditioning"
+            processing_skips[name] = {"detrend_native_grid": skips}
+        elif name in {"ECG1", "ECG2"}:
+            preprocessed[:, column] = preprocess_ecg(corrected[:, column])
+            processors[name] = "ecg_todo_passthrough"
+        elif name == "Blood Pressure":
+            preprocessed[:, column] = preprocess_bp(corrected[:, column])
+            processors[name] = "bp_todo_passthrough"
+        else:
+            processors[name] = (
+                "spo2_corrected_without_belt_filters"
+                if name == "SpO2"
+                else "unselected_passthrough"
+            )
+    masks["preprocessed_valid"] = masks["eligible"] & masks["preprocessed_support"]
+    return preprocessed, {
+        "channel_processors": processors,
+        "detrend": detrend_parameters,
+        "filtering": filter_details,
+        "processing_skips": processing_skips,
+    }

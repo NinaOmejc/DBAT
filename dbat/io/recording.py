@@ -437,3 +437,65 @@ def save_preview(result, config, path):
         f"{recording.recording_id} | native {result.original_fs_hz:g} Hz; processed {result.processed_fs_hz:g} Hz | {result.qc['review_status']} | Shading: teal = interpolated; orange = candidate"
     )
     figure.savefig(path, dpi=130)
+
+
+def preprocessing_provenance(result, config, prepared, decision):
+    """Assemble the unchanged preprocessing provenance for saved results.
+
+    Stage diagnostics arrive in result.provenance. Returns the original
+    complete dictionary, including processing order, grids, QC and mask counts,
+    and emits the existing final debug messages. No signal values are changed.
+    """
+    recording = result.recording
+    masks = result.masks
+    settings = config["preprocessing"]
+    diagnostics = result.provenance
+    processors = diagnostics["channel_processors"]
+    detrend_parameters = diagnostics["detrend"]
+    filter_details = diagnostics["filtering"]
+    smoothing_parameters = diagnostics["smoothing"]
+    resampling = diagnostics["resampling"]
+    processing_skips = diagnostics["processing_skips"]
+    processed_fs, times = result.processed_fs_hz, result.processed_time_sec
+    choice = decision["choice"] if decision else None
+    provenance = {
+        "algorithm_version": "dbat_preprocessing_v6",
+        "enabled": settings["enabled"],
+        "selected_channels": settings["channels"],
+        "qc_channels": config["qc"]["channels"],
+        "channel_processors": processors,
+        "detrend": detrend_parameters,
+        "filtering": filter_details,
+        "smoothing": smoothing_parameters,
+        "resampling": resampling,
+        "processing_order": "automatic correction; accepted polarity; native detrend; native highpass; native lowpass; optional resampling; one processed-grid smoothing pass",
+        "edge_policy": "Moving mean shrinks at recording ends with valid numerical support; genuine gap/artifact influence stays unsupported. Optional IIR filters cross QC/artifact flags; reflection guards at recording ends or genuine missing gaps remain unsupported.",
+        "signal_policy": "Numerical conditioning is independent of channel ratings, QC channel selection and reviewed coverage",
+        "processing_skips": processing_skips,
+        "respiratory_analysis_source": "signals/smoothed",
+        "respiratory_analysis_fs_hz": processed_fs,
+        "respiratory_analysis_policy": "Every future respiratory detector/analysis uses smoothed, processed_fs_hz and valid/interpolated masks; no second general smoothing pass",
+        "native_landmark_indices_compatible": processed_fs == recording.fs_hz
+        and np.array_equal(times, recording.time_sec),
+        "native_landmark_policy": "Require exact native-grid equality before direct historical MATLAB index reuse; otherwise reject direct reuse",
+        "matlab_difference": "All respiratory reference and spectral inputs use smoothed; MATLAB also uses unsmoothed recordings for some calculations",
+        "quality_policy": "Only selected QC channels with explicitly inspected support and usable ratings are eligible",
+        "automatic_cleaning": {"signature": prepared["signature"], **prepared["provenance"]},
+        "polarity": {
+            "assessment": prepared["polarity"],
+            "decision": decision,
+            "applied_to": choice,
+        },
+        "limitations": [
+            "No MATLAB numerical comparison performed",
+            "Review coverage may be partial",
+            "Automatic candidates are heuristic; interpolation is estimated, not newly inspected evidence",
+        ],
+        "counts": {
+            name: {key: int(mask[:, column].sum()) for key, mask in masks.items()}
+            for column, name in enumerate(recording.channels)
+        },
+    }
+    logger.debug("Smoothing: %s | Detrend: %s", smoothing_parameters, detrend_parameters)
+    logger.debug("Resampling: %s | Filtering: %s", resampling, filter_details)
+    return provenance

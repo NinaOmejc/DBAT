@@ -14,7 +14,9 @@ from scipy.ndimage import binary_dilation, gaussian_filter1d, median_filter
 from scipy.signal import find_peaks
 
 from ..config import BELTS
+from ..logging import logger
 from .annotations import continuous_runs, recording_identity, utc_now
+from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
@@ -403,3 +405,40 @@ def clean_recording(recording, config):
         "masks": masks,
         "provenance": provenance,
     }
+
+
+def prepare_recording(recording, config):
+    """Run automatic cleaning and source-oriented polarity assessment once.
+
+    Returns corrected native data, automatic masks/events, a preparation
+    signature and diagnostics. No manual evidence or polarity flip is inferred.
+    """
+    logger.info(
+        "  Automatic correction and optional polarity assessment for %s...", recording.recording_id
+    )
+    prepared = clean_recording(recording, config)
+    reliable = (
+        np.isfinite(prepared["corrected"])
+        & ~prepared["masks"]["interpolated"]
+        & ~prepared["masks"]["auto_candidate"]
+    )
+    prepared["polarity"] = assess_relative_belt_polarity(
+        prepared["corrected"],
+        recording.channels,
+        recording.fs_hz,
+        reliable,
+        config["preprocessing"]["check_relative_belt_polarity"],
+    )
+    logger.debug("Automatic cleaning: %s", prepared["provenance"]["channels"])
+    logger.debug("Relative polarity: %s", prepared["polarity"])
+    return prepared
+
+
+def preprocess_ecg(values):
+    """Pass through ECG; TODO: validated ECG-specific conditioning, beyond resampling."""
+    return values.copy()
+
+
+def preprocess_bp(values):
+    """Pass through BP; TODO: validated BP-specific conditioning, beyond resampling."""
+    return values.copy()

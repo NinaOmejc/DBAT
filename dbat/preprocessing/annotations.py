@@ -171,3 +171,28 @@ def annotation_masks(qc, recording):
                 if key == "artifact":
                     masks["reviewed"][start:end, column] = True
     return masks
+
+
+def add_analysis_masks(masks, corrected, recording, qc, selected_channels, automatic_masks):
+    """Attach numerical availability and existing QC eligibility to native masks.
+
+    Updates masks in place. Corrected samples have shape (native_samples,
+    channels); quality selection, coverage, ratings and artifacts remain
+    independent of numerical conditioning.
+    """
+    masks.update(automatic_masks)
+    masks["finite"] = np.isfinite(corrected)
+    usable = np.array([qc["channel_ratings"][name] == "usable" for name in recording.channels])
+    unknown = np.array(
+        [qc["channel_ratings"][name] in {"weak", "unassessed"} for name in recording.channels]
+    )
+    selected = np.array([name in selected_channels for name in recording.channels])
+    masks["quality_selected"] = np.broadcast_to(selected, corrected.shape).copy()
+    masks["uncertain"] = ~masks["reviewed"] | unknown[None, :] | ~masks["quality_selected"]
+    masks["eligible"] = (
+        masks["quality_selected"]
+        & masks["finite"]
+        & masks["reviewed"]
+        & ~masks["artifact"]
+        & usable[None, :]
+    )
