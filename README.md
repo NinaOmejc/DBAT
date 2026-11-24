@@ -2,8 +2,9 @@
 
 A Python 3.11+ repository implementing **Phase 1 (stages 0–3)**: numeric
 `.dat` IO, initial manual technical QC, persistent annotations, and configurable
-conditioning. Only source code and documentation belong in Git. Recording data
-and generated results stay local. Existing MAGMA repositories are read-only references.
+conditioning, plus the numerical respiratory landmark stage. Only source code
+and documentation belong in Git. Recording data and generated results stay local.
+Existing MAGMA repositories are read-only references.
 
 Public source repository: [NinaOmejc/DBAT](https://github.com/NinaOmejc/DBAT).
 
@@ -44,7 +45,11 @@ dbat/
     filtering.py
     polarity.py
     resampling.py
+    smoothing.py
     preproc_gui.py
+  peak_detection/
+    __init__.py
+    respiratory.py
 ```
 
 This standard flat layout places the `dbat` package directly in the repository.
@@ -52,6 +57,63 @@ The package folder matches the import name. Editable installation exposes the
 repository root through the normal Python search path. Use
 `from dbat.io.recording import load_dat_recording` and
 `from dbat.preprocessing.pipeline import preprocess_recording`.
+
+## Stage checks and respiratory peak detection
+
+`scripts/check_preprocessing.py` first checks every preprocessing component using
+temporary synthetic data: native IO/identity, QC annotation validation and masks,
+artifact cleaning and paired-breath protection, SpO2, all smoothers, full-series
+high/low-pass filters, detrending, polarity, primary resampling, saved grids/masks,
+numbered output directories, preview and HDF5/JSON round trips. It also exercises
+the preprocessing GUI's navigation, display modes, polarity, artifact editing,
+ratings, Save and Cancel callbacks on a headless canvas. Physical mouse/keyboard
+interaction and native-window appearance still require manual review.
+
+```powershell
+# Synthetic checks only: no external recordings or persistent outputs.
+.\venv\Scripts\python.exe scripts/check_preprocessing.py --self-checks-only
+
+# Component checks followed by configured real recordings, without opening the GUI.
+.\venv\Scripts\python.exe scripts/check_preprocessing.py --headless
+
+# Independent respiratory peak/trough checks.
+.\venv\Scripts\python.exe scripts/check_peak_detection.py
+.\venv\Scripts\python.exe scripts/check_peak_detection.py --h5 outputs/preproc_data/Sub105_M1/run0/Sub105_M1_preprocessing.h5
+```
+
+Omit `--headless` to retain the configured manual preprocessing review. The
+preprocessing checker accepts `--config` and an optional `--output-dir` for real
+check results. Headless execution creates no new manual review evidence. Both
+checkers use the project logger and fail with the original assertion/error.
+
+The respiratory detector is in **`dbat/peak_detection/respiratory.py`**, a folder
+inside this same DBAT project, alongside `preprocessing`. It reuses the numerical
+core previously implemented in MAGMA-ml, with source attribution, and uses SciPy
+`find_peaks`, MATLAB-style local split-peak QC, strict interior troughs, optional
+percentile troughs, three amplitude definitions and MATLAB RR statistics. The
+detector settings are exposed by `DetectorSettings`; it has no smoothing setting.
+
+```python
+from dbat.io.recording import load_preprocessing_result
+from dbat.peak_detection import detect_preprocessed
+
+preprocessed = load_preprocessing_result(h5_path)
+landmarks = detect_preprocessed(preprocessed)
+lungs = landmarks["belts"]["Resp-Lungs"]
+```
+
+The same function accepts an in-memory `PreprocessingResult`. It reads only the
+saved `smoothed` waveform, `processed_fs_hz` and processed-grid masks; it never
+smooths again or assumes 200 Hz after resampling. Peaks/troughs remain zero-based
+on that exact grid. Finite landmarks remain numerical evidence even on unreviewed
+or artifact-invalid support; analytical breath/IBI masks and reasons remain false
+there. Candidate/retained/removed peaks, prominences, reasons, waveform hashes,
+trough overrides and manual peak edits are retained. Numerical move/reset/edit
+functions are available for the later landmark GUI. The peak checker covers those
+operations, disabled QC, amplitudes/RR, missing data and processed-grid timing;
+`--h5` also checks a real saved recording read-only and verifies its file hash.
+DBAT's landmark review GUI and historical MATLAB import remain later integration
+work; this stage does not recompute downstream features or labels.
 
 ## Development setup
 
@@ -396,7 +458,8 @@ Historical MATLAB landmark indices require exact native-grid equality.
 `result.require_native_grid()` rejects direct reuse when sampling rate or time axis
 differs; a future importer must call this guard and also check identity, polarity,
 waveform and one-based indexing. Changing just the declared sampling rate cannot
-make old indices compatible. No landmark importer or detector is implemented yet.
+make old indices compatible. The respiratory detector uses the processed grid;
+historical MATLAB landmark import remains unimplemented.
 
 ## Outputs and manual verification
 
@@ -490,8 +553,9 @@ not a native DBAT dependency. Library behavior references:
 [MATLAB movmean](https://www.mathworks.com/help/matlab/ref/movmean.html) and
 [SciPy savgol_filter](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.savgol_filter.html).
 
-Later architecture only: stage 4 branches between detection/review for new
-recordings and selective read-only import of reviewed historical MATLAB landmarks,
+Stage 4 now has numerical respiratory detection; the remaining architecture
+branches between detection/review for new recordings and selective read-only import
+of reviewed historical MATLAB landmarks,
 then rejoins at stage 5 for all common quality-aware features. Stage 6 recomputes the
 11 automatic labels; stage 7 optionally reviews/imports immutable clinician rounds
 and explicit coverage (first historical target: `magma_ml_hdf5_v19`); stage 8 derives
@@ -500,6 +564,6 @@ branches directly from stage 5; supervised work selects a stage-6/7 target.
 Future imports must validate identity/native-grid alignment, polarity, smoothing,
 and schema; convert one-based inclusive MATLAB ranges explicitly; preserve original
 review decisions/history and frozen phenotype snapshots; and treat artifact-invalid
-evidence as unknown, never a rewritten negative. No landmarks, feature extraction,
-clinical labeling, phenotyping, clustering, classification or legacy import is
-implemented here. No tests, fixtures, CI or additional checker scripts are generated.
+evidence as unknown, never a rewritten negative. Feature extraction, clinical
+labeling, phenotyping, clustering, classification and legacy import remain later
+stages. Executable component checks live in the two stage checker scripts above.
