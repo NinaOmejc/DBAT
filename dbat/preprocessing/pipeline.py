@@ -148,7 +148,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     return result
 
 
-def preprocess_or_load_recording(recording, config):
+def run_preprocessing(recording, config):
     """Reuse compatible output, or load QC, review, preprocess and save a new run.
 
     Returns (PreprocessingResult, HDF5 path, reused). GUI cancellation returns
@@ -177,3 +177,7 @@ def preprocess_or_load_recording(recording, config):
     result = preprocess_recording(recording, config, qc, prepared=prepared)
     path = save_preprocessing_result(result, config)
     return result, path, False
+
+
+# Backward-compatible name for callers using the original pipeline entry point.
+preprocess_or_load_recording = run_preprocessing

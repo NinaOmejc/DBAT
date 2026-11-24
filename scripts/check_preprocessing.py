@@ -32,6 +32,7 @@ from dbat.io.recording import (
     source_sha256,
 )
 from dbat.logging import logger
+from dbat.preprocessing import run_preprocessing
 from dbat.preprocessing.annotations import (
     annotation_masks,
     continuous_runs,
@@ -56,7 +57,6 @@ from dbat.preprocessing.pipeline import (
     preprocess_belt,
     preprocess_bp,
     preprocess_ecg,
-    preprocess_or_load_recording,
     preprocess_recording,
 )
 from dbat.preprocessing.polarity import (
@@ -629,7 +629,7 @@ def check_recording(config, subject, measurement):
     recording = load_dat_recording(
         config, config["input"]["dat_file"] or None, subject=subject, measurement=measurement
     )
-    result, path, reused = preprocess_or_load_recording(recording, config)
+    result, path, reused = run_preprocessing(recording, config)
     if path is not None and not reused:
         verify_saved_result(path, result)
     return path

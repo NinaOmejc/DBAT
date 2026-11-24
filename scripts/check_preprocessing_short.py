@@ -12,7 +12,7 @@ import numpy as np
 from dbat.config import load_config
 from dbat.io.recording import load_dat_recording, load_preprocessing_result
 from dbat.logging import logger
-from dbat.preprocessing.pipeline import preprocess_or_load_recording
+from dbat.preprocessing import run_preprocessing
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "default.toml"
 
@@ -32,7 +32,7 @@ def main():
                 config, config["input"]["dat_file"] or None,
                 subject=subject, measurement=measurement,
             )
-            result, path, reused = preprocess_or_load_recording(recording, config)
+            result, path, reused = run_preprocessing(recording, config)
             if path is None:
                 continue
 
