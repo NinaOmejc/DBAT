@@ -24,7 +24,11 @@ from .pipeline import prepare_recording
 from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
 
 DISPLAY_MODES = ("shared_scale", "independent_scale", "corrected_view")
-DISPLAY_LABELS = ("Shared scale", "Independent scale", "Corrected view")
+DISPLAY_LABELS = (
+    "Original — shared scale",
+    "Original — independent scale",
+    "Corrected + original",
+)
 
 
 class ManualQCEditor:
@@ -155,12 +159,17 @@ class ManualQCEditor:
             else 1,
         )
         self._button((0.79, 0.250, 0.19, 0.035), "Confirm visible", self._confirm_visible)
-        self.display_button = self._button(
-            (0.79, 0.200, 0.19, 0.035),
-            DISPLAY_LABELS[DISPLAY_MODES.index(self.display_mode)], self._toggle_display,
+        self.display_modes = RadioButtons(
+            self.figure.add_axes((0.79, 0.115, 0.19, 0.11)),
+            DISPLAY_LABELS, active=DISPLAY_MODES.index(self.display_mode), activecolor="tab:blue",
         )
-        self._button((0.79, 0.115, 0.19, 0.05), "Save / Done", self._save)
-        self._button((0.79, 0.045, 0.19, 0.05), "Cancel", self._cancel)
+        self.display_modes.ax.set_title("Display mode", loc="left", fontsize=9, pad=4)
+        for label in self.display_modes.labels:
+            label.set_fontsize(8)
+            label.set_x(0.20)
+        self.display_modes.on_clicked(self._select_display)
+        self._button((0.79, 0.045, 0.09, 0.05), "Save / Done", self._save)
+        self._button((0.89, 0.045, 0.09, 0.05), "Cancel", self._cancel)
         self.slider = Slider(
             self.figure.add_axes((0.14, 0.105, 0.55, 0.025)),
             "Start sample",
@@ -286,12 +295,15 @@ class ManualQCEditor:
         )
         self._draw()
 
-    def _toggle_display(self, event):
-        """Cycle source shared/independent and corrected robust display-only views."""
-        index = (DISPLAY_MODES.index(self.display_mode) + 1) % len(DISPLAY_MODES)
-        self.display_mode = DISPLAY_MODES[index]
-        self.display_button.label.set_text(DISPLAY_LABELS[index])
+    def _select_display(self, label):
+        """Select a display-only view using the existing configuration mode keys."""
+        self.display_mode = DISPLAY_MODES[DISPLAY_LABELS.index(label)]
         self._draw()
+
+    def _toggle_display(self, event):
+        """Advance the radio selection for existing programmatic callers."""
+        index = (DISPLAY_MODES.index(self.display_mode) + 1) % len(DISPLAY_MODES)
+        self.display_modes.set_active(index)
 
     def _toggle_polarity_menu(self, event):
         """Show/activate or hide/deactivate the menu together, preventing ghost dots."""
@@ -309,9 +321,7 @@ class ManualQCEditor:
         self.polarity_menu.active = False
         if self.polarity_ack.get_status()[0]:
             self.polarity_ack.set_active(0)
-        self.display_mode = "corrected_view"
-        self.display_button.label.set_text("Corrected view")
-        self._draw()
+        self.display_modes.set_active(DISPLAY_MODES.index("corrected_view"))
 
     def _add_artifact(self, low, high, name):
         """Convert a drag to native [start,end) samples and preserve its provenance."""
@@ -378,7 +388,7 @@ class ManualQCEditor:
             self._draw()
 
     def _draw(self):
-        """Refresh the viewport and rating highlights; use native values for limits."""
+        """Refresh the viewport and control highlights; use native values for limits."""
         end = self.start + self.window
         step = max(1, math.ceil(self.window / self.settings["max_plot_points"]))
         indices = np.arange(self.start, end, step)
@@ -436,6 +446,10 @@ class ManualQCEditor:
                                 interval["start_sec"], interval["end_sec"], color=color, alpha=alpha
                             )
                         )
+        for mode, label in zip(DISPLAY_MODES, self.display_modes.labels, strict=True):
+            selected = mode == self.display_mode
+            label.set_color("tab:blue" if selected else "black")
+            label.set_fontweight("bold" if selected else "normal")
         for name, buttons in self.rating_buttons.items():
             for rating, button in buttons.items():
                 selected = self.qc["channel_ratings"][name] == rating

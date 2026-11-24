@@ -302,8 +302,10 @@ timestamps are saved separately from the manual QC evidence.
   (green shading); hidden channels receive no new review evidence. Navigation alone records no inspection. A usable recording-level
   rating alone does not establish locally artifact-free samples. Inspect all plots
   before confirming. Repeat through the recording for full coverage.
-- The display button cycles **Shared scale** (original belts, common limits),
-  **Independent scale** (originals, individual limits), and **Corrected view**
+- The **Display mode** radio group shows all three options, with a blue indicator
+  and bold blue label for the active mode: **Original — shared scale** (original
+  belts, common limits), **Original — independent scale** (individual limits),
+  and **Corrected + original**
   (interpolated signals, chosen orientation, robust 1st–99th-percentile display
   limits). `qc.display_mode` selects the initial mode; default is `corrected_view`.
   Corrected mode overlays the original in grey and also works for SpO2. Display
