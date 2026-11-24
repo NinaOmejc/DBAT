@@ -48,7 +48,7 @@ from .smoothing import (
 
 
 @dataclass
-class PreprocessingResult:
+class PreprocessedRecording:
     """Immutable native original and one primary preprocessed/smoothed sample grid."""
 
     recording: Recording
@@ -111,7 +111,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
 
     Returns
     -------
-    PreprocessingResult
+    PreprocessedRecording
         Original on the native grid; preprocessed/smoothed and every mask on one
         explicit processed grid. Numerical conditioning ignores ratings/reviewed
         coverage. Future respiratory detection uses smoothed and processed_fs_hz.
@@ -141,7 +141,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     diagnostics["resampling"] = resampling
     smoothed = smooth_recording(preprocessed, recording, processed_fs, settings, masks, diagnostics)
 
-    result = PreprocessingResult(
+    result = PreprocessedRecording(
         recording, preprocessed, smoothed, processed_fs, times, masks, qc, diagnostics
     )
     result.provenance = preprocessing_provenance(result, config, prepared, decision)
@@ -151,7 +151,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
 def run_preprocessing(recording, config):
     """Reuse compatible output, or load QC, review, preprocess and save a new run.
 
-    Returns (PreprocessingResult, HDF5 path, reused). GUI cancellation returns
+    Returns (PreprocessedRecording, HDF5 path, reused). GUI cancellation returns
     (None, None, False), preserving existing results and accepted QC. Cache hits
     skip preparation and GUI review; cache misses honor qc.open_gui as before.
     """
@@ -159,7 +159,7 @@ def run_preprocessing(recording, config):
     cached = load_reusable_preprocessing_result(recording, config, qc)
     if cached is not None:
         saved, path = cached
-        result = PreprocessingResult(
+        result = PreprocessedRecording(
             recording, saved["signals"]["preprocessed"], saved["signals"]["smoothed"],
             saved["processed_fs_hz"], saved["processed_time_sec"], saved["masks"],
             saved["metadata"]["qc"], saved["metadata"]["processing"],

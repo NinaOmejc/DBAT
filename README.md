@@ -111,7 +111,7 @@ landmarks = detect_preprocessed(preprocessed)
 lungs = landmarks["belts"]["Resp-Lungs"]
 ```
 
-The same function accepts an in-memory `PreprocessingResult`. It reads only the
+The same function accepts an in-memory `PreprocessedRecording`. It reads only the
 saved `smoothed` waveform, `processed_fs_hz` and processed-grid masks; it never
 smooths again or assumes 200 Hz after resampling. Peaks/troughs remain zero-based
 on that exact grid. Finite landmarks remain numerical evidence even on unreviewed

@@ -498,7 +498,7 @@ def detect_preprocessed(data, settings=None):
 
     Parameters
     ----------
-    data : PreprocessingResult or dict
+    data : PreprocessedRecording or dict
         Existing in-memory result, or load_preprocessing_result output. Uses
         only signals/smoothed, processed_fs_hz and processed-grid QC masks.
     settings : DetectorSettings, optional
