@@ -31,7 +31,7 @@ from dbat.io.recording import (
     save_qc_annotations,
     source_sha256,
 )
-from dbat.logging import configure_logging, logger
+from dbat.logging import logger
 from dbat.preprocessing.annotations import (
     annotation_masks,
     continuous_runs,
@@ -673,7 +673,6 @@ def main(config_file, *, self_checks_only=False, headless=False, output_dir=None
     """
     config = load_config(config_file)
     selection = config["run"]
-    configure_logging(selection["verbosity"])
     check_preprocessing_functions(config)
     logger.info("All preprocessing component checks passed.")
     if self_checks_only:

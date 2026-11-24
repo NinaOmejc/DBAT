@@ -7,6 +7,8 @@ from pathlib import Path
 
 import tomllib
 
+from .logging import configure_logging
+
 CHANNELS = ("ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm")
 BELTS = ("Resp-Lungs", "Resp-Diaphragm")
 RESULT_SCHEMA = "dbat_preprocessing_v3"
@@ -31,6 +33,7 @@ def load_config(path):
 
     Relative paths use the TOML directory. Returns the effective configuration
     plus the source file path/hash for provenance; no CLI overrides are applied.
+    Successful validation initializes project logging from run.verbosity.
     """
     path = Path(path).resolve(strict=True)
     with path.open("rb") as stream:
@@ -41,6 +44,7 @@ def load_config(path):
         raise ValueError(f"Missing configuration key: {error}; use configs/default.toml") from error
     config["config_path"] = str(path)
     config["config_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    configure_logging(config["run"]["verbosity"])
     return config
 
 
