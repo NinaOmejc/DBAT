@@ -1,4 +1,4 @@
-"""Optional SciPy Butterworth filtering on finite, non-artifact native belt runs."""
+"""Optional SciPy Butterworth filtering across each finite native belt waveform."""
 
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
@@ -7,14 +7,15 @@ from .annotations import continuous_runs
 
 
 def filter_belt(values, allowed, interpolated, fs_hz, settings):
-    """Filter a native belt without crossing missing data or confirmed artifacts.
+    """Filter a native belt continuously across QC and artifact flags.
 
     Parameters
     ----------
     values : ndarray, shape (n_samples,)
         Numerical belt values; the input is never modified.
     allowed, interpolated : ndarray of bool
-        Finite non-artifact samples and existing interpolation influence.
+        Analysis-support mask and existing interpolation influence. These masks
+        do not split or remove numerical samples before filtering.
     fs_hz : float
         Native sampling rate in Hz.
     settings : dict
@@ -25,7 +26,8 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
     tuple
         Values, support, interpolation influence, and actual filter/run provenance.
         Short runs retain their input with false support. Reflection guards stay
-        numerical but unsupported. IIR interpolation influence covers the whole run.
+        numerical but unsupported. IIR interpolation influence covers the whole
+        finite waveform. Only genuine nonfinite gaps create separate filter runs.
 
     Notes
     -----
@@ -33,7 +35,8 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
     https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.sosfiltfilt.html
     Outer even reflection and its cap follow the MIT-licensed MATLAB reference:
     https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/preprocess_data.m
-    DBAT splits at real gaps/artifacts instead of filling across them. The inner
+    QC flags do not create reflection boundaries. Genuine nonfinite gaps remain
+    missing and split filtering into finite runs. The inner
     odd extension is explicitly 3 * order = 12 samples (MATLAB filtfilt convention).
     Forward/backward application squares the single-pass magnitude response.
     """
@@ -59,7 +62,7 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
             inner_pad_samples=inner_pad,
             runs=[],
         )
-        for start, end in continuous_runs(allowed):
+        for start, end in continuous_runs(np.isfinite(values)):
             count = end - start
             run_info = {"start_sample": int(start), "end_sample": int(end)}
             details["runs"].append(run_info)
@@ -78,6 +81,7 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
             run_info["reflection_samples_each_end"] = pad
             details["applied"] = True
         details["support_policy"] = (
-            "Exclude each reflection-length edge guard; never filter across real gaps/artifacts"
+            "Filter all finite samples across QC/artifact flags; retain analysis masks "
+            "and exclude reflection guards only at recording ends or genuine missing gaps"
         )
     return output, support, influence, provenance

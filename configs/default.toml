@@ -57,7 +57,7 @@ window_sec = 60.0  # Moving-detrend window in seconds (MATLAB default); effectiv
 [preprocessing.filtering.highpass]
 enabled = false  # Apply one zero-phase high-pass before resampling; disabled for historical compatibility.
 cutoff_hz = 0.01  # High-pass cutoff in Hz, below native Nyquist.
-edge_pad_sec = 100.0  # Even reflection duration, capped at half each finite non-artifact run; matches preprocess_data.m.
+edge_pad_sec = 100.0  # Even reflection duration, capped at half the finite waveform; QC flags do not split filtering; matches preprocess_data.m.
 
 [preprocessing.filtering.lowpass]
 enabled = false  # Apply one zero-phase low-pass before resampling; SpO2 and ECG/BP are excluded.

@@ -316,8 +316,9 @@ its complete configured window; too-short runs retain input with false support.
 `preprocessed_support`/`smoothed_support` describe numerical support, independently
 of review. `valid` also requires usable selected quality and reviewed non-artifact
 support across the calculation window. Confirmed artifacts remain numerical but
-unsupported; smoothing windows touching them stay invalid. Detrending and optional
-IIR filters do not cross confirmed artifacts or missing gaps. Skips record their
+unsupported; smoothing windows touching them stay invalid. Detrending splits at
+confirmed artifacts or missing gaps. Optional IIR filters follow the complete
+finite waveform across QC/artifact flags. Skips record their
 native or processed coordinate basis. Interpolation influence is retained separately;
 filtering and upsampling never create manual evidence.
 
@@ -347,7 +348,7 @@ response (effective eighth-order roll-off). No MATLAB runtime is used.
 
 The high-pass edge convention follows the MIT reference `preprocess_data.m`:
 outer **even reflection excluding the endpoints**, length
-`min(max(12, round(edge_pad_sec * native_fs)), floor((run_length - 1)/2))`, then
+`min(max(12, round(edge_pad_sec * native_fs)), floor((finite_waveform_length - 1)/2))`, then
 an explicit 12-sample odd `sosfiltfilt` extension (three times filter order).
 The low-pass uses the same documented convention with a shorter configurable
 reflection duration. Padding is removed after filtering, preserving count/time
@@ -355,9 +356,13 @@ origin. Each reflection-length edge guard is numerical but unsupported; this is
 an explicit conservative transient policy, not a claim that IIR settling ends
 exactly there. Runs of at most 12 samples are preserved and marked unsupported.
 IIR influence from interpolated inputs conservatively covers the entire finite
-non-artifact run. Unlike MATLAB's temporary gap filling, DBAT splits runs at real
-gaps/artifacts. Filter settings, SOS coefficients, actual padding/run bounds,
-skips, order of operations and runtime package versions are saved. No exact MATLAB
+waveform. QC/artifact flags remain analysis masks and never introduce filter or
+reflection boundaries. A fully finite belt is filtered as one complete time series.
+Genuine nonfinite gaps remain missing and are the only internal filter boundaries.
+Flags alone do not clean a waveform: longer flagged artifacts retain their values,
+while supported brief glitches are interpolated upstream. Filter settings, SOS
+coefficients, actual padding/run bounds, skips, order of operations and runtime
+package versions are saved. No exact MATLAB
 numerical equivalence has been established.
 
 ## Optional primary resampling
@@ -395,11 +400,15 @@ make old indices compatible. No landmark importer or detector is implemented yet
 
 ## Outputs and manual verification
 
-Every run uses a new `outputs/preproc_data/SubN_MM/runs/<UTC-version>/`
-directory. Accepted QC also has a separately versioned JSON under
+Every run uses a new `outputs/preproc_data/SubN_MM/run0/`, then `run1/`,
+`run2/`, etc., directly inside the recording folder. Numbering starts at zero and
+continues above the highest existing or reserved run number. Previous timestamped
+outputs remain untouched; no extra `runs/` layer is created for new results.
+Accepted QC also has a separately versioned JSON under
 `outputs/preproc_data/SubN_MM/qc/`, reusable via
 `qc.annotation_files`; no previous result, accepted review, `.dat`, MATLAB `.mat` or HDF5 is replaced.
-A failure during writing leaves a `.partial` directory rather than a published run.
+A failure during writing leaves `.runN.partial` rather than a published run,
+reserving that number so the next save cannot overwrite incomplete work.
 
 `SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v3`**:
 
@@ -441,9 +450,9 @@ v3. Native `.dat` input and source-compatible standalone QC JSON remain supporte
 Inspect the most recent output after a successful run:
 
 ```powershell
-$dbatRun = Get-ChildItem .\outputs\preproc_data\Sub1_M1\runs -Directory |
-    Where-Object { $_.Name -notlike '*.partial' } |
-    Sort-Object Name | Select-Object -Last 1
+$dbatRun = Get-ChildItem .\outputs\preproc_data\Sub1_M1 -Directory |
+    Where-Object { $_.Name -match '^run\d+$' } |
+    Sort-Object { [int]($_.Name -replace '^run', '') } | Select-Object -Last 1
 Get-Content -LiteralPath (Join-Path $dbatRun.FullName 'summary.json')
 Get-Content -LiteralPath (Join-Path $dbatRun.FullName 'validation.json')
 Invoke-Item -LiteralPath (Join-Path $dbatRun.FullName 'preview.png')

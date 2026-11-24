@@ -141,7 +141,8 @@ def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
     -------
     tuple
         Numerical values, support, interpolation influence, filter provenance,
-        and skipped detrend runs. Gaps/artifacts split runs; QC ratings do not.
+        and skipped detrend runs. Detrending splits at gaps/artifacts; filtering
+        follows each finite waveform across QC flags. Ratings do not split either.
     """
     allowed = np.isfinite(values) & ~artifact
     output, support, influence = values.copy(), allowed.copy(), interpolated.copy()
@@ -371,7 +372,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
             processing_skips[name]["smoothing_processed_grid"] = skips
     masks["finite"] = np.isfinite(preprocessed) & np.isfinite(smoothed)
     provenance = {
-        "algorithm_version": "dbat_preprocessing_v5",
+        "algorithm_version": "dbat_preprocessing_v6",
         "enabled": settings["enabled"],
         "selected_channels": settings["channels"],
         "qc_channels": config["qc"]["channels"],
@@ -381,7 +382,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
         "smoothing": smoothing_parameters,
         "resampling": resampling,
         "processing_order": "automatic correction; accepted polarity; native detrend; native highpass; native lowpass; optional resampling; one processed-grid smoothing pass",
-        "edge_policy": "Moving mean shrinks at recording ends with valid numerical support; genuine gap/artifact influence stays unsupported. Optional IIR reflection guards remain unsupported.",
+        "edge_policy": "Moving mean shrinks at recording ends with valid numerical support; genuine gap/artifact influence stays unsupported. Optional IIR filters cross QC/artifact flags; reflection guards at recording ends or genuine missing gaps remain unsupported.",
         "signal_policy": "Numerical conditioning is independent of channel ratings, QC channel selection and reviewed coverage",
         "processing_skips": processing_skips,
         "respiratory_analysis_source": "signals/smoothed",

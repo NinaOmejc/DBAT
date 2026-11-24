@@ -290,18 +290,33 @@ def save_preprocessing_result(result, config):
 
     Existing runs and source files are never overwritten. Accepted QC is stored
     independently by the caller first, so a later processing failure cannot lose it.
-    Returns the final HDF5 path. Incomplete writes remain in a .partial directory.
+    Returns the final HDF5 path under run0, run1, etc. directly in the recording
+    folder. Incomplete writes reserve their number in a .runN.partial directory.
     """
     if config["output"]["schema_version"] != RESULT_SCHEMA:
         raise ValueError(f"New results must use {RESULT_SCHEMA}")
     recording = result.recording
     validate_qc_annotations(result.qc, recording)
     logger.info("  Saving preprocessing result for %s...", recording.recording_id)
-    root = _output_root(recording, config["paths"]["output_dir"]) / "runs"
+    root = _output_root(recording, config["paths"]["output_dir"])
     root.mkdir(parents=True, exist_ok=True)
-    version = _version_name()
-    temporary = root / f".{version}.partial"
-    temporary.mkdir()
+    number = 0
+    for path in root.iterdir():
+        match = re.fullmatch(r"\.?run(\d+)(?:\.partial)?", path.name)
+        if match:
+            number = max(number, int(match[1]) + 1)
+    while True:
+        version = f"run{number}"
+        temporary = root / f".{version}.partial"
+        try:
+            temporary.mkdir()
+        except FileExistsError:
+            number += 1
+            continue
+        if not (root / version).exists():
+            break
+        temporary.rmdir()
+        number += 1
     filename = config["output"]["filename"].format(recording_id=recording.recording_id)
     metadata = result_metadata(result, config)
     with h5py.File(temporary / filename, "x") as handle:
