@@ -194,7 +194,7 @@ def check_recording(config, subject, measurement):
     )
     prepared = prepare_recording(recording, config)
     if config["qc"]["open_gui"]:
-        from dbat.preprocessing.qc_gui import run_qc_gui
+        from dbat.preprocessing.preproc_gui import run_qc_gui
 
         qc = run_qc_gui(recording, config, qc, prepared=prepared)
         if qc is None:

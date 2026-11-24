@@ -44,7 +44,7 @@ dbat/
     filtering.py
     polarity.py
     resampling.py
-    qc_gui.py
+    preproc_gui.py
 ```
 
 This standard flat layout places the `dbat` package directly in the repository.
