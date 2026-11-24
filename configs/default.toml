@@ -30,12 +30,13 @@ reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
 max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing always uses native samples.
 
-# Optional accepted QC files, keyed by recording ID
+# Optional QC overrides; otherwise load the latest accepted recording_id/qc/*.json
 [qc.annotation_files]
 # Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Accepted QC or summary JSON; path relative to this TOML.
 
 # Preprocessed signal: automatic correction, accepted polarity, optional detrending and filtering
 [preprocessing]
+reuse_preproc = true  # Reuse the latest completed compatible run; false always saves a new run.
 enabled = true  # Enable configured belt conditioning independently of review status; QC still controls analysis validity.
 channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts selected for detrending/filtering/smoothing; SpO2 is only artifact-corrected; ECG/BP are pass-through TODOs.
 check_relative_belt_polarity = false  # Optional MATLAB-style relative assessment before QC; never flips either belt automatically.

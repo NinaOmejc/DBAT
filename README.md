@@ -170,8 +170,15 @@ This processes Sub1/M1, Sub1/M2 and Sub2/M2. Lists are a Cartesian product, not
 paired by position. The distributed default selects only Sub1/M1. Excluded pairs
 are skipped; cancelling a recording's GUI skips that recording and continues.
 Missing/malformed input or processing errors stop the run with an actionable error.
-Every completed recording uses the same package preprocessing functions and gets
-its own versioned result and round-trip verification.
+Both preprocessing scripts use the same shared workflow. With
+`preprocessing.reuse_preproc = true` (the default), they load the newest compatible
+completed `runN` from the recording's output folder, checking run numbers in
+descending numeric order. Source identity/SHA-256, native and processed grids,
+channel order, schema, processing versions/settings, selected QC channels and QC
+annotations must match. Incompatible runs are logged and partial writes are
+ignored. Cache hits leave existing outputs unchanged and skip the QC GUI.
+Set `reuse_preproc = false` to preprocess and save a new versioned run instead.
+New results receive the checker's existing round-trip checks.
 
 `run.verbosity` controls all DBAT console progress through the shared `dbat` logger:
 **0** is silent, **1** (default) shows recording IDs and high-level steps, and
@@ -200,8 +207,11 @@ also configured there. For debugging from another Python script, call
 
 Configured filenames are resolved for each pair. To inspect an explicitly named
 `.dat`, set `input.dat_file` and select exactly one subject and one measurement;
-identity, filename fs and column layout are still validated. To reuse accepted QC
-without repeating a review, put the recording's JSON path in the same TOML:
+identity, filename fs and column layout are still validated. Whenever processing
+is needed, the latest source-compatible accepted QC is loaded automatically from
+the recording's `qc/` folder; if none exists, annotations start unreviewed.
+`qc.open_gui` still controls review before processing. Optional explicit paths
+override automatic QC selection:
 
 ```toml
 [qc.annotation_files]
@@ -210,15 +220,16 @@ Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"
 
 Paths are relative to the TOML file unless absolute. QC files can also be a previous
 run's `summary.json`; schema, source hash, fs, native grid and channel identity must
-match. Missing map entries remain explicitly unreviewed. The checker does not
-install packages; exact runtime versions are saved with each result.
+match. The map and its entries may be omitted to use automatic QC discovery.
+The checker does not install packages; exact runtime versions are saved with
+each result.
 
 ## Automatic cleaning and relative belt polarity
 
-`check_recording()` loads immutable source samples, computes automatic corrections
-and optional polarity diagnostics once, then passes that cached preparation to the
-existing QC GUI. Accepted polarity is applied to a fresh corrected copy before
-native detrending/filtering, optional primary resampling, one processed-grid smoothing pass and versioned saving. ECG/BP are
+When a compatible saved result cannot be reused, `check_recording()` loads QC,
+computes automatic corrections and optional polarity diagnostics once, then passes
+that cached preparation to the existing QC GUI when enabled. Accepted polarity is
+applied to a fresh corrected copy before native detrending/filtering, optional primary resampling, one processed-grid smoothing pass and versioned saving. ECG/BP are
 unchanged by automatic cleaning. No downstream features or labels are computed.
 
 `preprocessing.artifacts` enables automatic cleaning by default. Belts use the latest
@@ -477,8 +488,9 @@ Every run uses a new `outputs/preproc_data/SubN_MM/run0/`, then `run1/`,
 continues above the highest existing or reserved run number. Previous timestamped
 outputs remain untouched; no extra `runs/` layer is created for new results.
 Accepted QC also has a separately versioned JSON under
-`outputs/preproc_data/SubN_MM/qc/`, reusable via
-`qc.annotation_files`; no previous result, accepted review, `.dat`, MATLAB `.mat` or HDF5 is replaced.
+`outputs/preproc_data/SubN_MM/qc/`, discovered automatically unless
+`qc.annotation_files` supplies an override; no previous result, accepted review,
+`.dat`, MATLAB `.mat` or HDF5 is replaced.
 A failure during writing leaves `.runN.partial` rather than a published run,
 reserving that number so the next save cannot overwrite incomplete work.
 

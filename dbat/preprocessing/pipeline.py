@@ -5,7 +5,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..config import BELTS as BELTS, window_samples as window_samples
-from ..io.recording import Recording, preprocessing_provenance
+from ..io.recording import (
+    Recording,
+    load_latest_qc_annotations,
+    load_reusable_preprocessing_result,
+    preprocessing_provenance,
+    save_preprocessing_result,
+    save_qc_annotations,
+)
 from ..logging import logger
 from .annotations import (
     add_analysis_masks,
@@ -139,3 +146,34 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     )
     result.provenance = preprocessing_provenance(result, config, prepared, decision)
     return result
+
+
+def preprocess_or_load_recording(recording, config):
+    """Reuse compatible output, or load QC, review, preprocess and save a new run.
+
+    Returns (PreprocessingResult, HDF5 path, reused). GUI cancellation returns
+    (None, None, False), preserving existing results and accepted QC. Cache hits
+    skip preparation and GUI review; cache misses honor qc.open_gui as before.
+    """
+    qc = load_latest_qc_annotations(recording, config)
+    cached = load_reusable_preprocessing_result(recording, config, qc)
+    if cached is not None:
+        saved, path = cached
+        result = PreprocessingResult(
+            recording, saved["signals"]["preprocessed"], saved["signals"]["smoothed"],
+            saved["processed_fs_hz"], saved["processed_time_sec"], saved["masks"],
+            saved["metadata"]["qc"], saved["metadata"]["processing"],
+        )
+        return result, path, True
+    prepared = prepare_recording(recording, config)
+    if config["qc"]["open_gui"]:
+        from .preproc_gui import run_qc_gui
+
+        qc = run_qc_gui(recording, config, qc, prepared=prepared)
+        if qc is None:
+            logger.info("Cancelled %s; no result saved", recording.recording_id)
+            return None, None, False
+        save_qc_annotations(qc, recording, config["paths"]["output_dir"])
+    result = preprocess_recording(recording, config, qc, prepared=prepared)
+    path = save_preprocessing_result(result, config)
+    return result, path, False

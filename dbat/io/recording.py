@@ -18,10 +18,14 @@ from ..logging import logger
 from ..preprocessing.annotations import (
     annotation_masks,
     continuous_runs,
+    new_qc_annotations,
     recording_identity,
     utc_now,
     validate_qc_annotations,
 )
+
+
+PREPROCESSING_ALGORITHM = "dbat_preprocessing_v6"
 
 
 @dataclass(frozen=True)
@@ -185,10 +189,154 @@ def load_qc_annotations(path, recording):
     logger.debug("QC source: %s", path)
     with path.open(encoding="utf-8") as stream:
         document = json.load(stream)
+    if not isinstance(document, dict):
+        raise ValueError("QC JSON must contain an object")
     qc = document["qc"] if document.get("schema_version") == RESULT_SCHEMA else document
+    if not isinstance(qc, dict):
+        raise ValueError("QC annotations must contain an object")
     validate_qc_annotations(qc, recording)
     qc["loaded_from_file"] = str(path)
     return qc
+
+
+def load_latest_qc_annotations(recording, config):
+    """Load an explicit QC override or the newest source-compatible accepted QC.
+
+    Automatic discovery uses saved UTC filenames in the recording's qc folder.
+    Rejected files are logged; absent accepted QC returns unreviewed annotations.
+    Explicit overrides retain load_qc_annotations' strict error behavior.
+    """
+    override = config["qc"].get("annotation_files", {}).get(recording.recording_id)
+    if override:
+        return load_qc_annotations(override, recording)
+    folder = _output_root(recording, config["paths"]["output_dir"]) / "qc"
+    for path in sorted(folder.glob("*.json"), reverse=True):
+        try:
+            qc = load_qc_annotations(path, recording)
+            if not qc["accepted_at_utc"]:
+                raise ValueError("QC has not been accepted")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            logger.warning("  Skipping QC %s: %s", path, error)
+            continue
+        return qc
+    return new_qc_annotations(recording, config["qc"]["reviewer"])
+
+
+def load_reusable_preprocessing_result(recording, config, qc):
+    """Return (saved result dictionary, HDF5 path) for the newest compatible run.
+
+    Only completed runN directories are considered, in descending numeric order.
+    Source, grids, schema, algorithms, numerical settings and current QC must
+    match; rejected runs are logged. Returns None when reuse is disabled or no
+    compatible run exists. Existing files and saved provenance remain unchanged.
+    """
+    if not config["preprocessing"].get("reuse_preproc", True):
+        return None
+    from ..preprocessing.cleaning import ALGORITHM_VERSION
+
+    validate_qc_annotations(qc, recording)
+    settings = {key: value for key, value in config["preprocessing"].items() if key != "reuse_preproc"}
+    ignored_qc = {"loaded_from_file"}
+    if not qc["accepted_at_utc"]:
+        ignored_qc.update(("created_at_utc", "reviewer"))
+    expected_qc = {key: value for key, value in qc.items() if key not in ignored_qc}
+    root = _output_root(recording, config["paths"]["output_dir"])
+    folders = sorted(
+        (path for path in root.glob("run*") if path.is_dir() and re.fullmatch(r"run[0-9]+", path.name)),
+        key=lambda path: int(path.name[3:]), reverse=True,
+    )
+    for folder in folders:
+        try:
+            paths = list(folder.glob("*.h5"))
+            if len(paths) != 1 or not (folder / "summary.json").is_file():
+                raise ValueError("run is incomplete or has ambiguous HDF5 results")
+            saved = load_preprocessing_result(paths[0])
+            metadata = saved["metadata"]
+            with (folder / "summary.json").open(encoding="utf-8") as stream:
+                if json.load(stream) != metadata:
+                    raise ValueError("HDF5 metadata and summary disagree")
+            if (
+                metadata["identity"] != recording_identity(recording)
+                or metadata["source"]["sha256"] != recording.source_sha256
+                or saved["original_fs_hz"] != recording.fs_hz
+                or saved["channels"] != list(recording.channels)
+                or recording.fs_hz != config["input"]["fs_hz"]
+                or list(recording.channels) != config["input"]["channels"]
+            ):
+                raise ValueError("source identity/hash, native sampling rate or channel order changed")
+            previous = metadata["config"]
+            if not isinstance(previous["preprocessing"], dict):
+                raise ValueError("saved preprocessing settings must be an object")
+            previous_settings = {
+                key: value for key, value in previous["preprocessing"].items() if key != "reuse_preproc"
+            }
+            processing = metadata["processing"]
+            if (
+                previous_settings != settings
+                or previous["qc"]["channels"] != config["qc"]["channels"]
+                or previous["output"]["schema_version"] != config["output"]["schema_version"]
+                or processing["algorithm_version"] != PREPROCESSING_ALGORITHM
+                or processing["automatic_cleaning"]["algorithm_version"] != ALGORITHM_VERSION
+            ):
+                raise ValueError("preprocessing settings, QC channel selection or algorithms changed")
+            saved_qc = metadata["qc"]
+            if not isinstance(saved_qc, dict):
+                raise ValueError("saved QC annotations must be an object")
+            validate_qc_annotations(saved_qc, recording)
+            if {key: value for key, value in saved_qc.items() if key not in ignored_qc} != expected_qc:
+                raise ValueError("saved QC differs from the latest accepted QC or explicit override")
+            decision = saved_qc.get("polarity")
+            if (
+                processing["polarity"]["decision"] != decision
+                or (decision and decision["preparation_signature"] != processing["automatic_cleaning"]["signature"])
+            ):
+                raise ValueError("saved polarity decision is incompatible with automatic cleaning")
+            target_fs = settings["resampling"]["resample_freq"] or recording.fs_hz
+            rate = processing["resampling"]
+            count = len(recording.samples)
+            if rate["applied"]:
+                if any(type(rate[key]) is not int or rate[key] <= 0 for key in ("up", "down")):
+                    raise ValueError("invalid saved resampling ratio")
+                count = (count * rate["up"] + rate["down"] - 1) // rate["down"]
+                if saved["processed_fs_hz"] != recording.fs_hz * rate["up"] / rate["down"]:
+                    raise ValueError("saved sampling rate disagrees with resampling ratio")
+            elif saved["processed_fs_hz"] != recording.fs_hz:
+                raise ValueError("native result has a different processed sampling rate")
+            if not np.isclose(saved["processed_fs_hz"], target_fs, rtol=1e-10, atol=0):
+                raise ValueError("processed sampling rate changed")
+            if (
+                metadata["original_grid"]["fs_hz"] != recording.fs_hz
+                or metadata["original_grid"]["n_samples"] != len(recording.samples)
+                or metadata["processed_grid"]["fs_hz"] != saved["processed_fs_hz"]
+                or metadata["processed_grid"]["n_samples"] != count
+            ):
+                raise ValueError("saved grid metadata disagrees with the source/processed grid")
+            shape = (count, len(recording.channels))
+            if (
+                not np.array_equal(saved["signals"]["original"], recording.samples, equal_nan=True)
+                or not np.array_equal(saved["original_time_sec"], recording.time_sec)
+                or not np.array_equal(saved["processed_time_sec"], np.arange(count) / saved["processed_fs_hz"])
+                or any(saved["signals"][name].shape != shape for name in ("preprocessed", "smoothed"))
+            ):
+                raise ValueError("saved signals or time grids do not match the source/processed grid")
+            required_masks = {
+                "artifact", "reviewed", "interpolated", "auto_candidate", "finite",
+                "quality_selected", "uncertain", "eligible", "preprocessed_support",
+                "preprocessed_interpolated", "preprocessed_valid", "smoothed_support",
+                "smoothed_interpolated", "valid",
+            }
+            if rate["applied"]:
+                required_masks.update(("boundary", "missing_influence"))
+            if not required_masks <= saved["masks"].keys() or any(
+                mask.shape != shape or mask.dtype != bool for mask in saved["masks"].values()
+            ):
+                raise ValueError("saved QC/support masks are missing or use a different grid")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            logger.warning("  Not reusing %s: %s", folder, error)
+            continue
+        logger.info("  Reusing preprocessing for %s: %s", recording.recording_id, paths[0])
+        return saved, paths[0]
+    return None
 
 
 def load_preprocessing_result(path):
@@ -459,7 +607,7 @@ def preprocessing_provenance(result, config, prepared, decision):
     processed_fs, times = result.processed_fs_hz, result.processed_time_sec
     choice = decision["choice"] if decision else None
     provenance = {
-        "algorithm_version": "dbat_preprocessing_v6",
+        "algorithm_version": PREPROCESSING_ALGORITHM,
         "enabled": settings["enabled"],
         "selected_channels": settings["channels"],
         "qc_channels": config["qc"]["channels"],

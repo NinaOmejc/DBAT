@@ -149,7 +149,7 @@ def _validate(config, directory):
         raise ValueError("qc.initial_rating must be unassessed; ratings require explicit review")
     if not isinstance(qc["reviewer"], str):
         raise ValueError("qc.reviewer must be text")
-    annotation_files = qc["annotation_files"]
+    annotation_files = qc.setdefault("annotation_files", {})
     if not isinstance(annotation_files, dict):
         raise ValueError("qc.annotation_files must map recording IDs to accepted QC JSON files")
     for recording_id, filename in annotation_files.items():
@@ -170,6 +170,7 @@ def _validate(config, directory):
         (preprocessing["check_relative_belt_polarity"], "preprocessing.check_relative_belt_polarity"),
         (preprocessing["artifacts"]["automatic_detection"], "preprocessing.artifacts.automatic_detection"),
         (preprocessing["enabled"], "preprocessing.enabled"),
+        (preprocessing.setdefault("reuse_preproc", True), "preprocessing.reuse_preproc"),
         (output["save_preview"], "output.save_preview"),
     ]:
         if type(value) is not bool:

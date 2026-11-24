@@ -8,7 +8,7 @@ Self-checks exercise all preprocessing modules on temporary synthetic recordings
 including GUI callbacks with an Agg canvas (no desktop interaction). Interactive
 GUI appearance and physical mouse/keyboard use still require manual inspection.
 Processes every selected subject/measurement pair, skipping explicit exclusions.
-Writes versioned HDF5/JSON results and optional previews, then checks each round trip.
+Reuses compatible runs; new outputs get versioned HDF5/JSON, previews and round-trip checks.
 """
 
 import argparse
@@ -56,6 +56,7 @@ from dbat.preprocessing.pipeline import (
     preprocess_belt,
     preprocess_bp,
     preprocess_ecg,
+    preprocess_or_load_recording,
     preprocess_recording,
 )
 from dbat.preprocessing.polarity import (
@@ -620,7 +621,7 @@ def verify_saved_result(path, result):
 
 
 def check_recording(config, subject, measurement):
-    """Load, prepare once, review, condition and verify one recording.
+    """Reuse compatible output or review, condition and verify one new recording.
 
     Cancel returns None and leaves existing results and accepted QC untouched.
     All processing goes through the same DBAT package functions as a single run.
@@ -628,25 +629,9 @@ def check_recording(config, subject, measurement):
     recording = load_dat_recording(
         config, config["input"]["dat_file"] or None, subject=subject, measurement=measurement
     )
-    qc_file = config["qc"]["annotation_files"].get(recording.recording_id)
-    qc = (
-        load_qc_annotations(qc_file, recording)
-        if qc_file
-        else new_qc_annotations(recording, config["qc"]["reviewer"])
-    )
-    prepared = prepare_recording(recording, config)
-    if config["qc"]["open_gui"]:
-        from dbat.preprocessing.preproc_gui import run_qc_gui
-
-        qc = run_qc_gui(recording, config, qc, prepared=prepared)
-        if qc is None:
-            return None
-        save_qc_annotations(qc, recording, config["paths"]["output_dir"])
-
-    result = preprocess_recording(recording, config, qc, prepared=prepared)
-    path = save_preprocessing_result(result, config)
-
-    verify_saved_result(path, result)
+    result, path, reused = preprocess_or_load_recording(recording, config)
+    if path is not None and not reused:
+        verify_saved_result(path, result)
     return path
 
 
