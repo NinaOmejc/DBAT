@@ -30,9 +30,10 @@ reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
 max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing always uses native samples.
 
-# Optional QC overrides; otherwise load the latest accepted recording_id/qc/*.json
+# Automatically load the latest source-compatible accepted QC from <output_dir>/<recording_id>/qc/.
+# Leave this table empty for automatic discovery; add paths only to override individual recordings.
 [qc.annotation_files]
-# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Accepted QC or summary JSON; path relative to this TOML.
+# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Optional accepted QC or summary.json override; path relative to this TOML.
 
 # Preprocessed signal: automatic correction, accepted polarity, optional detrending and filtering
 [preprocessing]
