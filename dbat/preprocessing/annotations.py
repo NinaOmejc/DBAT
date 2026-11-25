@@ -69,6 +69,62 @@ def make_interval(start, end, channels, fs_hz, reviewer):
     }
 
 
+def merge_artifact_intervals(qc, fs_hz, reviewer):
+    """Merge overlapping artifacts in place without changing per-channel coverage.
+
+    Parameters
+    ----------
+    qc : dict
+        Private GUI annotations. Replaced originals are retained in edit_history.
+    fs_hz : float
+        Native sampling frequency in Hz, used for the merged sample/second bounds.
+    reviewer : str
+        Reviewer responsible for the edit or normalization of the private copy.
+
+    Notes
+    -----
+    Touching half-open intervals stay separate. Multi-channel annotations stay
+    grouped only when the same original intervals contribute on those channels;
+    independent channel annotations never acquire coupled deletion behaviour.
+    """
+    originals = qc["artifacts"]
+    grouped = {}
+    channels = dict.fromkeys(name for interval in originals for name in interval["channels"])
+    for name in channels:
+        runs = []
+        for interval in sorted(
+            (item for item in originals if name in item["channels"]),
+            key=lambda item: (item["start_sample"], item["end_sample"]),
+        ):
+            start, end = interval["start_sample"], interval["end_sample"]
+            if runs and start < runs[-1][1]:
+                runs[-1][1] = max(runs[-1][1], end)
+                runs[-1][2].append(interval)
+            else:
+                runs.append([start, end, [interval]])
+        for start, end, contributors in runs:
+            key = (start, end, tuple(sorted(item["id"] for item in contributors)))
+            if key not in grouped:
+                grouped[key] = {"channels": [], "originals": contributors}
+            grouped[key]["channels"].append(name)
+    merged = []
+    for (start, end, _), group in grouped.items():
+        source = group["originals"]
+        if len(source) == 1 and set(group["channels"]) == set(source[0]["channels"]):
+            merged.append(source[0])
+        else:
+            merged.append(make_interval(start, end, group["channels"], fs_hz, reviewer))
+    kept = {item["id"] for item in originals} & {item["id"] for item in merged}
+    replaced = [item for item in originals if item["id"] not in kept]
+    if replaced:
+        qc["artifacts"] = sorted(merged, key=lambda item: (item["start_sample"], item["end_sample"]))
+        qc["edit_history"].append({
+            "action": "merge_artifacts", "original_intervals": replaced,
+            "merged_intervals": [item for item in merged if item["id"] not in kept],
+            "reviewer": reviewer, "created_at_utc": utc_now(),
+        })
+
+
 def review_status(qc):
     """Describe accepted review evidence, including partial clean inspection."""
     if not qc["accepted_at_utc"]:

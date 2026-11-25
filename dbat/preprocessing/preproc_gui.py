@@ -13,6 +13,7 @@ from ..logging import logger
 from .annotations import (
     RATINGS,
     make_interval,
+    merge_artifact_intervals,
     continuous_runs,
     new_qc_annotations,
     recording_identity,
@@ -55,6 +56,7 @@ class ManualQCEditor:
             else new_qc_annotations(recording)
         )
         validate_qc_annotations(self.qc, recording)
+        merge_artifact_intervals(self.qc, recording.fs_hz, self.qc["reviewer"])
         self.prepared = prepare_recording(recording, config) if prepared is None else prepared
         if self.prepared["identity"] != recording_identity(recording):
             raise ValueError("GUI preparation does not match this source recording")
@@ -324,7 +326,7 @@ class ManualQCEditor:
         self.display_modes.set_active(DISPLAY_MODES.index("corrected_view"))
 
     def _add_artifact(self, low, high, name):
-        """Convert a drag to native [start,end) samples and preserve its provenance."""
+        """Add native [start,end) bounds, merging overlaps and retaining their history."""
         reviewer = self._reviewer_name()
         if not reviewer:
             return
@@ -343,10 +345,11 @@ class ManualQCEditor:
             self.qc["artifacts"].append(
                 make_interval(start, end, channels, self.recording.fs_hz, reviewer)
             )
+            merge_artifact_intervals(self.qc, self.recording.fs_hz, reviewer)
             self._draw()
 
     def _remove_artifact(self, event):
-        """Remove the latest overlapping annotation by right click; retain its history."""
+        """Remove the merged annotation under the cursor; retain its edit history."""
         if event.button != 3 or event.inaxes not in self.axes or event.xdata is None:
             return
         reviewer = self._reviewer_name()
@@ -354,8 +357,7 @@ class ManualQCEditor:
             return
         name = self.channels[list(self.axes).index(event.inaxes)]
         sample = math.floor(event.xdata * self.recording.fs_hz)
-        for index in range(len(self.qc["artifacts"]) - 1, -1, -1):
-            interval = self.qc["artifacts"][index]
+        for index, interval in enumerate(self.qc["artifacts"]):
             if (
                 name in interval["channels"]
                 and interval["start_sample"] <= sample < interval["end_sample"]

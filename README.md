@@ -299,10 +299,16 @@ timestamps are saved separately from the manual QC evidence.
   technical ratings, never a clinical minimal-excursion assessment.
 - Left-drag on a belt in **Both belts** mode to mark both belts. **Dragged channel**
   marks only the subplot receiving the drag, including SpO2. Red shading is an
-  artifact. Right-click it to remove the most recent overlapping annotation, then
-  redraw to correct bounds. Removed intervals remain in the accepted edit history.
-  Overlapping original annotations are retained; masks union them without double
-  counting duration. A physiological sigh is not a technical artifact.
+  artifact. Overlapping intervals merge per channel into one red region and one
+  annotation, including chained overlaps; touching intervals remain separate.
+  Right-click removes the whole merged annotation under the cursor, then redraw
+  to correct bounds. Both-belt annotations remain linked when the same overlapping
+  edits contribute to both belts; independent channel edits stay independent.
+  A single-belt extension never expands the other belt's exclusion.
+  Original merged and removed intervals remain in edit history. Existing overlaps
+  are normalized only in the GUI's private copy; previous saved files stay intact.
+  Merging preserves the same excluded samples. A physiological sigh is not a
+  technical artifact.
 - **Confirm visible** explicitly records inspected coverage on the configured plots
   (green shading); hidden channels receive no new review evidence. Navigation alone records no inspection. A usable recording-level
   rating alone does not establish locally artifact-free samples. Inspect all plots
