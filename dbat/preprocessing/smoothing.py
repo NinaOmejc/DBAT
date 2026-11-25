@@ -40,6 +40,30 @@ def _window_influence(flagged, finite, window, method):
     return influence
 
 
+def smoothing_masks(finite, support, eligible, interpolated, parameters):
+    """Propagate support, QC eligibility and interpolation without smoothing values.
+
+    Boolean vectors share the processed grid. Window/edge rules are identical
+    to smooth_belt, including shrinking means and short Savitzky-Golay runs.
+    """
+    method, window = parameters["method"], parameters["window_samples"]
+    if method == "none":
+        return support.copy(), eligible & support, interpolated.copy()
+    numeric_support = support.copy()
+    if method == "savitzky_golay":
+        for start, end in continuous_runs(finite):
+            if end - start < window:
+                numeric_support[start:end] = False
+    numeric_support &= finite & ~_window_influence(~support, finite, window, method)
+    valid = (
+        numeric_support
+        & eligible
+        & ~_window_influence(~eligible, finite, window, method)
+    )
+    influence = _window_influence(interpolated, finite, window, method) & finite
+    return numeric_support, valid, influence
+
+
 def smooth_belt(values, support, eligible, interpolated, parameters):
     """Smooth finite processed runs once, retaining ordinary boundary support.
 
@@ -65,12 +89,10 @@ def smooth_belt(values, support, eligible, interpolated, parameters):
     skips = []
     if method == "none":
         return output, support.copy(), eligible & support, interpolated.copy(), skips
-    numeric_support = support.copy()
     for start, end in continuous_runs(finite):
         run = values[start:end]
         if method == "savitzky_golay":
             if len(run) < window:
-                numeric_support[start:end] = False
                 skips.append(
                     {
                         "start_sample": int(start),
@@ -82,9 +104,9 @@ def smooth_belt(values, support, eligible, interpolated, parameters):
             output[start:end] = savgol_filter(run, window, parameters["polyorder"], mode="interp")
         else:
             output[start:end] = moving_mean(run, window)
-    numeric_support &= finite & ~_window_influence(~support, finite, window, method)
-    valid = numeric_support & eligible & ~_window_influence(~eligible, finite, window, method)
-    influence = _window_influence(interpolated, finite, window, method) & finite
+    numeric_support, valid, influence = smoothing_masks(
+        finite, support, eligible, interpolated, parameters
+    )
     return output, numeric_support, valid, influence, skips
 
 

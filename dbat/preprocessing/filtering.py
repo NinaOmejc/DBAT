@@ -9,6 +9,21 @@ from .cleaning import preprocess_bp, preprocess_ecg
 from .detrending import detrend_belt, detrending_parameters
 
 
+def filtering_support(allowed, filters):
+    """Apply recorded finite-run reflection/short-run guards without filtering values."""
+    support = allowed.copy()
+    for details in filters.values():
+        for run in details.get("runs", []):
+            start, end = run["start_sample"], run["end_sample"]
+            if "skip_reason" in run:
+                support[start:end] = False
+            else:
+                pad = run["reflection_samples_each_end"]
+                support[start : start + pad] = False
+                support[end - pad : end] = False
+    return support
+
+
 def filter_belt(values, allowed, interpolated, fs_hz, settings):
     """Filter a native belt continuously across QC and artifact flags.
 
@@ -44,7 +59,6 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
     Forward/backward application squares the single-pass magnitude response.
     """
     output = values.copy()
-    support = allowed.copy()
     influence = interpolated.copy()
     provenance = {}
     order = 4
@@ -70,15 +84,12 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
             run_info = {"start_sample": int(start), "end_sample": int(end)}
             details["runs"].append(run_info)
             if count <= inner_pad:
-                support[start:end] = False
                 run_info["skip_reason"] = "too_short_for_zero_phase_filter"
                 continue
             pad = min(requested_pad, (count - 1) // 2)
             padded = np.pad(output[start:end], pad, mode="reflect")
             filtered = sosfiltfilt(sos, padded, padtype="odd", padlen=inner_pad)
             output[start:end] = filtered[pad : pad + count]
-            support[start : start + pad] = False
-            support[end - pad : end] = False
             if influence[start:end].any():
                 influence[start:end] = True
             run_info["reflection_samples_each_end"] = pad
@@ -87,7 +98,7 @@ def filter_belt(values, allowed, interpolated, fs_hz, settings):
             "Filter all finite samples across QC/artifact flags; retain analysis masks "
             "and exclude reflection guards only at recording ends or genuine missing gaps"
         )
-    return output, support, influence, provenance
+    return output, filtering_support(allowed, provenance), influence, provenance
 
 
 def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):

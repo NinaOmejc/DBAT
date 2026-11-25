@@ -30,7 +30,7 @@ scale_mode = "shared"  # shared | independent; shared uses common belt amplitude
 artifact_scope = "both_belts"  # both_belts | selected_channel; the latter marks only the dragged subplot's channel.
 reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
-max_plot_points = 5000  # Point limit per channel in views longer than 10 s; short views draw all samples; annotations stay native.
+max_plot_points = 5000  # Target limit per channel in long views, also capped at two extrema/pixel; short views draw all samples; annotations stay native.
 
 # Automatically reuse the latest compatible accepted QC from run folders (including recoverable pending runs).
 # Leave this table empty for automatic discovery; add paths only to override individual recordings.

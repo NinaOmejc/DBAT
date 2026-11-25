@@ -298,6 +298,10 @@ timestamps are saved separately from the manual QC evidence.
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
   200 Hz; `600` seconds is **120000 samples**. Longer views may be thinned;
   views of 10 s or less draw every native/processed sample without path simplification.
+  Long views retain each bin's actual minimum/maximum samples in time order,
+  plus endpoints and missing-gap boundaries. The point budget is the smaller of
+  `max_plot_points` and two samples per horizontal pixel; no averaging changes
+  the displayed source values. Original and final curves are sampled separately.
   Toolbar zoom/pan also refreshes samples for the actual visible interval.
 - The GUI opens maximized to the current monitor's available screen area on the
   standard Windows Tk/Qt/wx backends. Normal window controls remain available.
@@ -369,8 +373,21 @@ used only in memory for conditioning and impact metrics.
 `prepared["corrected"]` remains a temporary, source-oriented input for initial
 technical QC and polarity assessment; it is not saved as a fourth canonical signal.
 The GUI opens after the complete provisional detrending/filtering/resampling/
-smoothing chain. Rating, coverage, artifact and polarity edits refresh
-its final preview and masks. On acceptance the workflow writes recoverable QC,
+smoothing chain. Rating and coverage edits refresh only QC masks and labels;
+computed waveforms, quality windows and MAE stay in memory. A source/settings/
+polarity signature guards reuse. Artifact edits also reuse numerical values when
+detrending is off, while filtering/resampling/smoothing support and validity are
+updated through the same mask functions used by full preprocessing. With active
+detrending, affected artifact bounds invalidate numerical reuse; polarity changes
+also rerun numerical processing. No GUI cache is loaded from disk.
+
+Navigation reuses indexed interval unions and a pool of shading rectangles,
+rendering only visible intervals. One viewport's sampled curves and its legend
+are reused where possible. Slider changes no longer request an extra canvas
+redraw, and programmatic zoom updates do not force a TextBox render. Matplotlib's
+normal coalesced canvas rendering is retained, including resize/export behavior.
+
+On acceptance the workflow writes recoverable QC,
 then recomputes the accepted result; the writer rejects provisional previews.
 A failed preview is cleared and reported rather than silently reused.
 

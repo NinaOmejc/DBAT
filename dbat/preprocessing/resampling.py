@@ -8,6 +8,65 @@ from scipy.ndimage import maximum_filter1d, minimum_filter1d
 from scipy.signal import firwin, resample_poly
 
 
+def resample_masks(native_masks, native_finite, processed_finite, *, up, down, radius):
+    """Project Boolean masks through the existing conservative FIR footprint.
+
+    Arrays have shape (samples, channels) on their respective grids. This shared
+    mask-only path performs no waveform resampling and preserves all edge rules.
+    """
+    n_samples, n_channels = native_finite.shape
+    output_count = len(processed_finite)
+    left = np.minimum(np.arange(output_count) * down // up, n_samples - 1)
+
+    def full_support(mask):
+        """Require every native sample in the conservative FIR footprint."""
+        eroded = minimum_filter1d(
+            mask.astype(np.uint8), 2 * radius + 1, axis=0, mode="constant", cval=0
+        )
+        return eroded[left].astype(bool)
+
+    def any_influence(mask):
+        """Retain any flagged contribution within the same FIR footprint."""
+        expanded = maximum_filter1d(
+            mask.astype(np.uint8), 2 * radius + 1, axis=0, mode="constant", cval=0
+        )
+        return expanded[left].astype(bool)
+
+    boundary = np.broadcast_to(
+        ~full_support(np.ones((n_samples, 1), dtype=bool)), (output_count, n_channels)
+    ).copy()
+    masks = {
+        "boundary": boundary,
+        "reviewed": full_support(native_masks["reviewed"]),
+        "eligible": full_support(native_masks["eligible"]),
+        "artifact": any_influence(native_masks["artifact"]),
+        "auto_candidate": any_influence(native_masks["auto_candidate"]),
+        "unresolved_candidate": any_influence(native_masks["unresolved_candidate"]),
+        "uncertain": any_influence(native_masks["uncertain"]) | boundary,
+        "quality_selected": native_masks["quality_selected"][left].copy(),
+        "missing_influence": any_influence(~native_masks["finite"]),
+    }
+    masks["finite"] = processed_finite
+    masks["preprocessed_support"] = (
+        full_support(
+            native_masks["preprocessed_support"]
+            & native_finite
+            & ~native_masks["artifact"]
+        )
+        & masks["finite"]
+    )
+    masks["preprocessed_valid"] = (
+        full_support(native_masks["preprocessed_valid"]) & masks["preprocessed_support"]
+    )
+    masks["preprocessed_interpolated"] = (
+        any_influence(native_masks["preprocessed_interpolated"]) & masks["finite"]
+    )
+    masks["interpolated"] = (
+        any_influence(native_masks["interpolated"]) & masks["finite"]
+    )
+    return masks
+
+
 def resample_preprocessed(values, masks, native_fs, settings):
     """Return the primary preprocessed grid and conservatively mapped masks.
 
@@ -60,35 +119,6 @@ def resample_preprocessed(values, masks, native_fs, settings):
     left = np.minimum(numerator // up, n_samples - 1)
     right = np.minimum((numerator + up - 1) // up, n_samples - 1)
 
-    def full_support(mask):
-        """Require every native sample in the conservative FIR footprint."""
-        eroded = minimum_filter1d(
-            mask.astype(np.uint8), 2 * radius + 1, axis=0, mode="constant", cval=0
-        )
-        return eroded[left].astype(bool)
-
-    def any_influence(mask):
-        """Retain any flagged contribution within the same FIR footprint."""
-        expanded = maximum_filter1d(
-            mask.astype(np.uint8), 2 * radius + 1, axis=0, mode="constant", cval=0
-        )
-        return expanded[left].astype(bool)
-
-    boundary = np.broadcast_to(
-        ~full_support(np.ones((n_samples, 1), dtype=bool)), (output_count, n_channels)
-    ).copy()
-    native_masks = masks
-    masks = {
-        "boundary": boundary,
-        "reviewed": full_support(native_masks["reviewed"]),
-        "eligible": full_support(native_masks["eligible"]),
-        "artifact": any_influence(native_masks["artifact"]),
-        "auto_candidate": any_influence(native_masks["auto_candidate"]),
-        "unresolved_candidate": any_influence(native_masks["unresolved_candidate"]),
-        "uncertain": any_influence(native_masks["uncertain"]) | boundary,
-        "quality_selected": native_masks["quality_selected"][left].copy(),
-        "missing_influence": any_influence(~native_masks["finite"]),
-    }
     finite = np.isfinite(values)
     available = finite[left] & finite[right]
     resampled = np.full((output_count, n_channels), np.nan)
@@ -104,18 +134,9 @@ def resample_preprocessed(values, masks, native_fs, settings):
             numerical, up, down, window=coefficients, padtype="line"
         )
     resampled[~available] = np.nan
-    masks["finite"] = np.isfinite(resampled)
-    masks["preprocessed_support"] = (
-        full_support(native_masks["preprocessed_support"] & finite & ~native_masks["artifact"])
-        & masks["finite"]
+    masks = resample_masks(
+        masks, finite, np.isfinite(resampled), up=up, down=down, radius=radius
     )
-    masks["preprocessed_valid"] = (
-        full_support(native_masks["preprocessed_valid"]) & masks["preprocessed_support"]
-    )
-    masks["preprocessed_interpolated"] = (
-        any_influence(native_masks["preprocessed_interpolated"]) & masks["finite"]
-    )
-    masks["interpolated"] = any_influence(native_masks["interpolated"]) & masks["finite"]
     provenance.update(
         applied=True,
         method="scipy.signal.resample_poly",

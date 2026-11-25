@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import matplotlib
 import numpy as np
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider, SpanSelector, TextBox
 
 from ..config import BELTS, window_samples
@@ -22,11 +22,34 @@ from .annotations import (
     validate_qc_annotations,
 )
 from .cleaning import prepare_recording
-from .pipeline import preprocess_recording
+from .pipeline import preprocess_recording, numerical_input_signature, refresh_qc_masks
 from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
 
 DISPLAY_MODES = ("original", "cleaned", "preprocessed")
 DISPLAY_LABELS = ("Original", "Cleaned", "Preprocessed + Original")
+
+
+def _plot_indices(values, limit, full_detail=False):
+    """Keep actual min/max samples in temporal order, plus endpoints and gap edges.
+
+    No averaging/interpolation is used. Short views return every sample; extra
+    gap-edge samples may exceed the plotting target to avoid bridging missing data.
+    """
+    count = len(values)
+    if full_detail or count <= limit:
+        return np.arange(count)
+    width = math.ceil(count / max(1, limit // 2))
+    finite = np.isfinite(values)
+    padded = np.pad(values, (0, (-count) % width), constant_values=np.nan).reshape(
+        -1, width
+    )
+    good = np.isfinite(padded)
+    offsets = np.arange(len(padded)) * width
+    minimum = offsets + np.argmin(np.where(good, padded, np.inf), axis=1)
+    maximum = offsets + np.argmax(np.where(good, padded, -np.inf), axis=1)
+    edges = np.flatnonzero(np.diff(np.r_[False, ~finite, False]))
+    gap_edges = np.r_[edges[::2], edges[1::2] - 1, edges[::2] - 1, edges[1::2]]
+    return np.unique(np.clip(np.r_[0, minimum, maximum, gap_edges, count - 1], 0, count - 1))
 
 
 class ManualQCEditor:
@@ -42,8 +65,8 @@ class ManualQCEditor:
         import matplotlib.pyplot as plt
 
         self.recording = recording
-        self.config = config
-        self.settings = config["qc"]
+        self.config = deepcopy(config)
+        self.settings = self.config["qc"]
         self.polarity_enabled = config["preprocessing"]["check_relative_belt_polarity"]
         self.channels = tuple(self.settings["channels"])
         self.columns = tuple(recording.channels.index(name) for name in self.channels)
@@ -92,6 +115,11 @@ class ManualQCEditor:
         self.display_mode = self.settings["display_mode"]
         self.scale_mode = self.settings["scale_mode"]
         self.shading = []
+        self._patch_pool = {}
+        self._plot_cache = {}
+        self._plot_window = None
+        self._interval_key = None
+        self._legend_mode = None
         self.figure, axes = plt.subplots(
             len(self.channels), 1, sharex=True, figsize=(14, 9), squeeze=False
         )
@@ -242,6 +270,7 @@ class ManualQCEditor:
             valstep=1,
             valfmt="%d",
         )
+        self.slider.drawon = False
         self.slider.on_changed(self._navigate)
         self._button((0.09, 0.045, 0.10, 0.035), "Previous", lambda event: self._move(-1))
         self._button((0.20, 0.045, 0.10, 0.035), "Next", lambda event: self._move(1))
@@ -265,9 +294,11 @@ class ManualQCEditor:
             )
             for axis, name in zip(self.axes, self.channels, strict=True)
         ]
+        self._cache_intervals()
         self._draw()
         for axis in self.axes:
             axis.callbacks.connect("xlim_changed", self._view_limits_changed)
+        self.figure.canvas.mpl_connect("resize_event", lambda event: self._draw())
         # Native maximization follows the current monitor's available screen area.
         window = getattr(self.figure.canvas.manager, "window", None)
         if hasattr(window, "showMaximized"):  # Qt
@@ -317,9 +348,7 @@ class ManualQCEditor:
             return
         self.window = window
         value = window if self.settings["window_unit"] == "samples" else window / fs_hz
-        self.window_box.eventson = False
-        self.window_box.set_val(str(value))
-        self.window_box.eventson = True
+        self.window_box.text_disp.set_text(str(value))
         self._navigate(start)
 
     def _move(self, direction):
@@ -346,10 +375,8 @@ class ManualQCEditor:
             if self.settings["window_unit"] == "samples"
             else self.window / self.recording.fs_hz
         )
-        self.window_box.eventson = False
-        self.window_box.set_val(str(value))
-        self.window_box.eventson = True
-        self.slider.set_val(self.start)
+        self.window_box.text_disp.set_text(str(value))
+        self._navigate(self.start)
 
     def _set_window(self, text):
         """Set viewport length in the configured seconds or samples unit."""
@@ -359,6 +386,7 @@ class ManualQCEditor:
             self._message(str(error))
             return
         self.window = max(2, min(self.recording.samples.shape[0], length))
+        self.window_box.text_disp.set_text(text)
         self._navigate(self.start)
 
     def _set_rating(self, name, rating):
@@ -435,21 +463,99 @@ class ManualQCEditor:
         self._draw()
 
     def _refresh_preview(self):
-        """Recompute private decisions; failed previews are cleared, never reused."""
+        """Refresh QC masks; reuse numerical stages only when their exact inputs match."""
         qc = deepcopy(self.qc)
         qc["reviewer"] = self.reviewer.text.strip() or qc["reviewer"]
-        self.preview = None
         self.preview_error = None
-        self.corrected = apply_polarity(
-            self.prepared["corrected"], self.recording.channels, self.polarity_choice
+        signature = numerical_input_signature(
+            self.prepared, self.config, qc, self.polarity_choice
         )
         try:
-            self.preview = preprocess_recording(
-                self.recording, self.config, qc, prepared=self.prepared, provisional=True
-            )
+            if (
+                self.preview is not None
+                and self.preview.provenance["numerical_input_signature"] == signature
+            ):
+                self.preview = refresh_qc_masks(
+                    self.preview, self.config, qc, self.prepared
+                )
+            else:
+                self.corrected = apply_polarity(
+                    self.prepared["corrected"],
+                    self.recording.channels,
+                    self.polarity_choice,
+                )
+                self._plot_cache.clear()
+                self.preview = preprocess_recording(
+                    self.recording,
+                    self.config,
+                    qc,
+                    prepared=self.prepared,
+                    provisional=True,
+                )
         except (ValueError, FloatingPointError) as error:
+            self.preview = None
             self.preview_error = str(error)
+        self._cache_intervals()
         self._draw()
+
+    def _cache_intervals(self):
+        """Index interval unions only when annotations or automatic evidence change."""
+        quality = self.preview.signal_quality if self.preview is not None else None
+        manual = tuple(
+            (field, item["start_sample"], item["end_sample"], tuple(item["channels"]))
+            for field in ("reviewed_intervals", "artifacts")
+            for item in self.qc[field]
+        )
+        key = (id(quality), manual)
+        if key == self._interval_key:
+            return
+        self._interval_key = key
+        self._intervals = {}
+        for name, column in zip(self.channels, self.columns, strict=True):
+            groups = {
+                "interpolated": list(
+                    continuous_runs(self.prepared["masks"]["interpolated"][:, column])
+                ),
+                "early": list(
+                    continuous_runs(self.prepared["masks"]["auto_candidate"][:, column])
+                ),
+                "noise": [
+                    (item["start_sample"], item["end_sample"])
+                    for item in quality["candidates"]
+                    if item["channel"] == name
+                ]
+                if quality
+                else [],
+            }
+            for field in ("reviewed_intervals", "artifacts"):
+                groups[field] = [
+                    (item["start_sample"], item["end_sample"])
+                    for item in self.qc[field]
+                    if name in item["channels"]
+                ]
+            for kind, ranges in groups.items():
+                merged = []
+                for first, last in sorted(ranges):
+                    if merged and first <= merged[-1][1]:
+                        merged[-1][1] = max(merged[-1][1], last)
+                    else:
+                        merged.append([first, last])
+                self._intervals[name, kind] = np.asarray(merged, dtype=int).reshape(-1, 2)
+
+    def _visible_samples(self, data, times, column, first, last):
+        """Reuse one viewport's extrema-preserving plot samples and amplitude bounds."""
+        key = (id(data), column, int(first), int(last))
+        if key not in self._plot_cache:
+            values = data[first:last, column]
+            limit = min(
+                self.settings["max_plot_points"],
+                max(2, 2 * int(self.axes[0].bbox.width)),
+            )
+            indices = _plot_indices(
+                values, limit, self.window <= 10 * self.recording.fs_hz
+            )
+            self._plot_cache[key] = (times[first:last][indices], values[indices])
+        return self._plot_cache[key]
 
     def _add_artifact(self, low, high, name):
         """Add native [start,end) bounds, merging overlaps and retaining their history."""
@@ -519,34 +625,19 @@ class ManualQCEditor:
         """Draw informational shading and true samples; short views are never thinned."""
         end = self.start + self.window
         lower, upper = self.start / self.recording.fs_hz, end / self.recording.fs_hz
-        full_detail = self.window <= 10 * self.recording.fs_hz
-        native_step = (
-            1
-            if full_detail
-            else max(1, math.ceil(self.window / self.settings["max_plot_points"]))
-        )
-        native_indices = np.arange(self.start, end, native_step)
+        window_key = (self.start, self.window, int(self.axes[0].bbox.width))
+        if window_key != self._plot_window:
+            self._plot_cache.clear()
+            self._plot_window = window_key
         if self.display_mode == "preprocessed" and self.preview is not None:
             times, displayed = (
                 self.preview.processed_time_sec,
                 self.preview.preproc_signal,
             )
             first, last = np.searchsorted(times, [lower, upper])
-            step = (
-                1
-                if full_detail
-                else max(
-                    1, math.ceil((last - first) / self.settings["max_plot_points"])
-                )
-            )
-            indices = np.arange(first, last, step)
         elif self.display_mode == "preprocessed":
+            times, displayed = self.recording.time_sec, self.corrected
             first = last = 0
-            times, displayed, indices = (
-                self.recording.time_sec,
-                self.corrected,
-                np.array([], dtype=int),
-            )
         else:
             times = self.recording.time_sec
             displayed = (
@@ -554,12 +645,19 @@ class ManualQCEditor:
                 if self.display_mode == "cleaned"
                 else self.recording.samples
             )
-            first, last, indices = self.start, end, native_indices
+            first, last = self.start, end
         limits = {}
         for name, column in zip(self.channels, self.columns, strict=True):
-            values = displayed[first:last, column]
+            _, values = self._visible_samples(displayed, times, column, first, last)
             if self.display_mode == "preprocessed":
-                values = np.r_[values, self.recording.samples[self.start : end, column]]
+                _, original = self._visible_samples(
+                    self.recording.samples,
+                    self.recording.time_sec,
+                    column,
+                    self.start,
+                    end,
+                )
+                values = np.r_[values, original]
             finite = values[np.isfinite(values)]
             limits[name] = (
                 (float(finite.min()), float(finite.max()))
@@ -572,15 +670,7 @@ class ManualQCEditor:
                 max(limits[name][1] for name in self.belt_channels),
             )
             limits.update(dict.fromkeys(self.belt_channels, bounds))
-        for patch in self.shading:
-            patch.remove()
-        self.shading.clear()
-        noise_candidates = (
-            self.preview.signal_quality["candidates"]
-            if self.preview is not None
-            else []
-        )
-        candidates = self.prepared["candidates"] + noise_candidates
+        visible = 0
         for axis, name, column, line, original in zip(
             self.axes,
             self.channels,
@@ -589,74 +679,71 @@ class ManualQCEditor:
             self.original_lines,
             strict=True,
         ):
-            line.set_data(times[indices], displayed[indices, column])
+            line.set_data(*self._visible_samples(displayed, times, column, first, last))
             if self.display_mode == "preprocessed":
                 original.set_data(
-                    self.recording.time_sec[native_indices],
-                    self.recording.samples[native_indices, column],
+                    *self._visible_samples(
+                        self.recording.samples,
+                        self.recording.time_sec,
+                        column,
+                        self.start,
+                        end,
+                    )
                 )
             else:
                 original.set_data([], [])
             line.get_path().should_simplify = False
             original.get_path().should_simplify = False
-            for mask, color, hatch in (
-                (self.prepared["masks"]["interpolated"], "teal", "//"),
-                (self.prepared["masks"]["auto_candidate"], "orange", None),
+            for kind, color, alpha, hatch in (
+                ("interpolated", "teal", 0.18, "//"),
+                ("early", "orange", 0.18, None),
+                ("noise", "purple", 0.18, None),
+                ("reviewed_intervals", "tab:green", 0.10, None),
+                ("artifacts", "tab:red", 0.25, None),
             ):
-                for first_flag, last_flag in continuous_runs(
-                    mask[self.start : end, column]
-                ):
-                    self.shading.append(
-                        axis.axvspan(
-                            (self.start + first_flag) / self.recording.fs_hz,
-                            (self.start + last_flag) / self.recording.fs_hz,
+                intervals = self._intervals[name, kind]
+                lo = np.searchsorted(intervals[:, 1], self.start, side="right")
+                hi = np.searchsorted(intervals[:, 0], end, side="left")
+                shown = intervals[lo:hi]
+                if kind in {"early", "noise"}:
+                    visible += len(shown)
+                pool = self._patch_pool.setdefault((name, kind), [])
+                for index, (a, b) in enumerate(shown):
+                    if index == len(pool):
+                        patch = Rectangle(
+                            (0, 0),
+                            0,
+                            1,
+                            transform=axis.get_xaxis_transform(),
                             facecolor=color,
-                            edgecolor=color,
-                            alpha=0.18,
+                            edgecolor=color if hatch else "none",
+                            alpha=alpha,
                             hatch=hatch,
                         )
+                        axis.add_patch(patch)
+                        pool.append(patch)
+                        self.shading.append(patch)
+                    patch = pool[index]
+                    left, right = (
+                        max(a, self.start) / self.recording.fs_hz,
+                        min(b, end) / self.recording.fs_hz,
                     )
-            for candidate in noise_candidates:
-                if (
-                    candidate["channel"] == name
-                    and candidate["end_sec"] > lower
-                    and candidate["start_sec"] < upper
-                ):
-                    self.shading.append(
-                        axis.axvspan(
-                            candidate["start_sec"],
-                            candidate["end_sec"],
-                            facecolor="purple",
-                            alpha=0.18,
-                        )
-                    )
+                    patch.set_x(left)
+                    patch.set_width(right - left)
+                    patch.set_visible(True)
+                for patch in pool[len(shown) :]:
+                    patch.set_visible(False)
             low, high = limits[name]
             margin = 0.05 * (high - low) if high > low else max(0.1, abs(low) * 0.05)
             axis.set_ylim(low - margin, high + margin)
             axis.set_ylabel(f"{name}\n{self.qc['channel_ratings'][name]}", fontsize=8)
             axis.grid(alpha=0.2)
-            for field, color, alpha in (
-                ("reviewed_intervals", "tab:green", 0.10),
-                ("artifacts", "tab:red", 0.25),
-            ):
-                for interval in self.qc[field]:
-                    if (
-                        name in interval["channels"]
-                        and interval["end_sample"] > self.start
-                        and interval["start_sample"] < end
-                    ):
-                        self.shading.append(
-                            axis.axvspan(
-                                interval["start_sec"],
-                                interval["end_sec"],
-                                color=color,
-                                alpha=alpha,
-                            )
-                        )
         for mode, label in zip(DISPLAY_MODES, self.display_modes.labels, strict=True):
             label.set_color("tab:blue" if mode == self.display_mode else "black")
             label.set_fontweight("bold" if mode == self.display_mode else "normal")
-        for mode, label in zip(("shared", "independent"), self.scale_modes.labels, strict=True):
+        for mode, label in zip(
+            ("shared", "independent"), self.scale_modes.labels, strict=True
+        ):
             label.set_color("tab:blue" if mode == self.scale_mode else "black")
             label.set_fontweight("bold" if mode == self.scale_mode else "normal")
         for name, buttons in self.rating_buttons.items():
@@ -668,7 +755,8 @@ class ManualQCEditor:
                 button.label.set_color("white" if active else "black")
         if self.polarity_enabled:
             acknowledge = (
-                self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None
+                self.prepared["polarity"]["polarity_warning"]
+                and self.polarity_choice is None
             )
             self.polarity_ack.active = acknowledge
             self.polarity_ack.ax.set_visible(acknowledge)
@@ -691,20 +779,16 @@ class ManualQCEditor:
             if self.display_mode == "preprocessed"
             else [self.lines[0]]
         )
-        self.axes[0].legend(
-            handles=waveform_handles + self.legend_shading,
-            loc="upper right",
-            fontsize=7,
-            ncol=2,
-        )
+        if self._legend_mode != self.display_mode:
+            self._legend_mode = self.display_mode
+            self.axes[0].legend(
+                handles=waveform_handles + self.legend_shading,
+                loc="upper right",
+                fontsize=7,
+                ncol=2,
+            )
         for axis in self.axes:
             axis.set_xlim(lower, upper, emit=False)
-        visible = sum(
-            item["channel"] in self.channels
-            and item["end_sample"] > self.start
-            and item["start_sample"] < end
-            for item in candidates
-        )
         message = f"Native samples [{self.start}, {end}) | {len(self.qc['artifacts'])} manual artifacts | {visible} automatic candidates in view"
         if self.preview_error:
             message += f"\nFinal preview unavailable: {self.preview_error}"

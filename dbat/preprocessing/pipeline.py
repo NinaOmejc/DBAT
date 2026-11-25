@@ -1,7 +1,7 @@
 """Orchestrate correction, polarity, native conditioning, resampling and smoothing."""
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 
@@ -25,10 +25,10 @@ from .annotations import (
     unresolved_candidate_mask,
 )
 from .cleaning import prepare_recording
-from .filtering import detrend_and_filter_recording
+from .filtering import detrend_and_filter_recording, filtering_support
 from .polarity import apply_polarity, orient_prepared
-from .resampling import resample_preprocessed
-from .smoothing import smooth_recording
+from .resampling import resample_preprocessed, resample_masks
+from .smoothing import smooth_recording, smoothing_masks
 from .signal_quality import assess_signal_quality
 from .impact import preprocessing_impact
 
@@ -46,6 +46,7 @@ class PreprocessedRecording:
     qc: dict
     provenance: dict
     signal_quality: dict
+    native_conditioning_masks: dict  # In-memory GUI support only; never written to HDF5.
 
     @property
     def original(self):
@@ -75,6 +76,130 @@ class PreprocessedRecording:
             raise ValueError(
                 "Native landmark indices cannot be reused on a different processed grid"
             )
+
+
+def numerical_input_signature(prepared, config, qc, choice):
+    """Identify numerical inputs; ratings/coverage never alter the waveform.
+
+    Manual artifacts affect numerical values only when selected belts are
+    detrended. Filter/support masks still update when those values are reused.
+    """
+    settings = config["preprocessing"]
+    artifacts = []
+    if settings["enabled"] and settings["detrend"]["method"] != "none":
+        for interval in qc["artifacts"]:
+            channels = sorted(set(interval["channels"]) & set(settings["channels"]))
+            if channels:
+                artifacts.append(
+                    [interval["start_sample"], interval["end_sample"], channels]
+                )
+    return hashlib.sha256(
+        json.dumps(
+            [prepared["signature"], settings, choice, sorted(artifacts)], sort_keys=True
+        ).encode()
+    ).hexdigest()
+
+
+def _add_noise_masks(masks, recording, qc, prepared, quality, times):
+    """Attach unchanged review-only quality warnings on the processed grid."""
+    candidates = review_candidates(qc, prepared, quality)
+    noise_mask = np.zeros(recording.samples.shape, dtype=bool)
+    for candidate in quality["candidates"]:
+        column = recording.channels.index(candidate["channel"])
+        noise_mask[candidate["start_sample"] : candidate["end_sample"], column] = True
+    native_index = np.minimum(
+        np.floor(times * recording.fs_hz + 1e-9).astype(int), len(recording.samples) - 1
+    )
+    masks["noise_candidate"] = noise_mask[native_index]
+    masks["unresolved_noise_candidate"] = unresolved_candidate_mask(
+        qc, prepared, candidates, source_stage="signal_quality"
+    )[native_index]
+
+
+def refresh_qc_masks(result, config, qc, prepared):
+    """Return a provisional result with current QC and cached numerical arrays.
+
+    Identity/settings/polarity and detrending-dependent artifact bounds must
+    match the saved input signature. Uses the same filtering, resampling and
+    smoothing mask functions as full processing, without filtering samples or
+    recalculating quality/MAE. Final accepted runs are recomputed before saving.
+    """
+    decision = qc.get("polarity")
+    if decision and decision["preparation_signature"] != prepared["signature"]:
+        decision = None
+    choice = decision["choice"] if decision else None
+    signature = numerical_input_signature(prepared, config, qc, choice)
+    if result.provenance["numerical_input_signature"] != signature:
+        raise ValueError(
+            "QC edit changes numerical inputs; full preprocessing is required"
+        )
+    recording, diagnostics = result.recording, result.provenance
+    qc = deepcopy(qc)
+    qc["review_status"] = review_status(qc)
+    masks = annotation_masks(qc, recording, allow_unaccepted=True)
+    add_analysis_masks(
+        masks,
+        prepared["corrected"],
+        recording,
+        qc,
+        config["qc"]["channels"],
+        {
+            **prepared["masks"],
+            "unresolved_candidate": unresolved_candidate_mask(qc, prepared),
+        },
+    )
+    native = result.native_conditioning_masks
+    support = masks["finite"] & ~masks["artifact"]
+    for column, name in enumerate(recording.channels):
+        if diagnostics["channel_processors"][name] == "belt_conditioning":
+            if diagnostics["detrend"]["method"] == "none":
+                support[:, column] = filtering_support(
+                    support[:, column], diagnostics["filtering"][name]
+                )
+            else:
+                support[:, column] = native["preprocessed_support"][:, column]
+    masks["preprocessed_support"] = support
+    masks["preprocessed_valid"] = masks["eligible"] & support
+    masks["preprocessed_interpolated"] = native["preprocessed_interpolated"]
+    rate = diagnostics["resampling"]
+    processed_finite = np.isfinite(result.preprocessed)
+    if rate["applied"]:
+        masks = resample_masks(
+            masks,
+            native["finite"],
+            processed_finite,
+            up=rate["up"],
+            down=rate["down"],
+            radius=rate["native_support_radius_samples"],
+        )
+    masks["smoothed_support"] = masks["preprocessed_support"].copy()
+    masks["smoothed_interpolated"] = masks["preprocessed_interpolated"].copy()
+    masks["valid"] = masks["preprocessed_valid"].copy()
+    for column, name in enumerate(recording.channels):
+        if diagnostics["channel_processors"][name] == "belt_conditioning":
+            (
+                masks["smoothed_support"][:, column],
+                masks["valid"][:, column],
+                masks["smoothed_interpolated"][:, column],
+            ) = smoothing_masks(
+                processed_finite[:, column],
+                masks["preprocessed_support"][:, column],
+                masks["eligible"][:, column],
+                masks["preprocessed_interpolated"][:, column],
+                diagnostics["smoothing"],
+            )
+    masks["finite"] = processed_finite & np.isfinite(result.preproc_signal)
+    _add_noise_masks(
+        masks, recording, qc, prepared, result.signal_quality, result.processed_time_sec
+    )
+    updated = replace(result, qc=qc, masks=masks)
+    updated.provenance = preprocessing_provenance(updated, config, prepared, decision)
+    updated.provenance.update(
+        provisional=True,
+        numerical_input_signature=signature,
+        preprocessing_impact=diagnostics["preprocessing_impact"],
+    )
+    return updated
 
 
 def preprocess_recording(
@@ -141,6 +266,11 @@ def preprocess_recording(
     preprocessed, diagnostics, detrended = detrend_and_filter_recording(
         corrected, recording, settings, masks
     )
+    native_conditioning_masks = {
+        "preprocessed_support": masks["preprocessed_support"],
+        "preprocessed_interpolated": masks["preprocessed_interpolated"],
+        "finite": np.isfinite(preprocessed),
+    }
     preprocessed, masks, processed_fs, times, resampling = resample_preprocessed(
         preprocessed, masks, recording.fs_hz, settings["resampling"]
     )
@@ -160,18 +290,7 @@ def preprocess_recording(
         settings["signal_quality"],
         numerical_signature,
     )
-    candidates = review_candidates(qc, prepared, quality)
-    noise_mask = np.zeros(recording.samples.shape, dtype=bool)
-    for candidate in quality["candidates"]:
-        column = recording.channels.index(candidate["channel"])
-        noise_mask[candidate["start_sample"] : candidate["end_sample"], column] = True
-    native_index = np.minimum(
-        np.floor(times * recording.fs_hz + 1e-9).astype(int), len(recording.samples) - 1
-    )
-    masks["noise_candidate"] = noise_mask[native_index]
-    masks["unresolved_noise_candidate"] = unresolved_candidate_mask(
-        qc, prepared, candidates, source_stage="signal_quality"
-    )[native_index]
+    _add_noise_masks(masks, recording, qc, prepared, quality, times)
     result = PreprocessedRecording(
         recording,
         preprocessed,
@@ -182,9 +301,13 @@ def preprocess_recording(
         qc,
         diagnostics,
         quality,
+        native_conditioning_masks,
     )
     result.provenance = preprocessing_provenance(result, config, prepared, decision)
     result.provenance["provisional"] = provisional
+    result.provenance["numerical_input_signature"] = numerical_input_signature(
+        prepared, config, qc, decision["choice"] if decision else None
+    )
     oriented_original = apply_polarity(
         recording.samples, recording.channels, decision["choice"] if decision else None
     )
