@@ -7,6 +7,7 @@ from uuid import uuid4
 import numpy as np
 
 QC_SCHEMA = "dbat_qc_v2"
+READABLE_QC_SCHEMAS = {"dbat_qc_v1", QC_SCHEMA}
 RATINGS = ("unassessed", "usable", "weak", "unavailable")
 
 
@@ -141,7 +142,8 @@ def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
     No intervals are clipped, silently repaired, or promoted to clean evidence.
     Channel rating and inspected coverage remain independent decisions.
     """
-    if qc.get("schema_version") != QC_SCHEMA or qc.get("identity") != recording_identity(recording):
+    if (qc.get("schema_version") not in READABLE_QC_SCHEMAS
+            or qc.get("identity") != recording_identity(recording)):
         raise ValueError(
             "QC schema or source identity/hash/fs/channel grid does not match this recording"
         )
@@ -162,9 +164,11 @@ def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
             or not resolution.get("candidate_id")
             or len(resolution.get("preparation_signature", "")) != 64
             or not resolution.get("reasons")
-            or resolution.get("source_stage") not in {"early_cleaning", "signal_quality"}
-            or not isinstance(resolution.get("candidate"), dict)
-            or resolution["candidate"].get("id") != resolution.get("candidate_id")
+            or (qc["schema_version"] == QC_SCHEMA and (
+                resolution.get("source_stage") not in {"early_cleaning", "signal_quality"}
+                or not isinstance(resolution.get("candidate"), dict)
+                or resolution["candidate"].get("id") != resolution.get("candidate_id")
+            ))
         ):
             raise ValueError(
                 "Candidate resolution needs a decision and original detection provenance"
@@ -194,7 +198,8 @@ def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
             ):
                 if not math.isclose(interval[key], expected, rel_tol=0, abs_tol=1e-9):
                     raise ValueError("QC seconds disagree with its native sample coordinates")
-            if interval.get("schema_version") != QC_SCHEMA or not interval.get("source"):
+            if (interval.get("schema_version") not in READABLE_QC_SCHEMAS
+                    or not interval.get("source")):
                 raise ValueError("QC interval lacks a supported schema/source")
             if not interval.get("reviewer", "").strip() or not interval.get("created_at_utc"):
                 raise ValueError("QC interval lacks reviewer/time provenance")
@@ -270,7 +275,7 @@ def active_candidate_resolutions(qc, prepared, candidates=None):
         if (
             candidate is not None
             and decision["preparation_signature"] == candidate["preparation_signature"]
-            and decision["source_stage"] == candidate["source_stage"]
+            and decision.get("source_stage", "early_cleaning") == candidate["source_stage"]
             and decision["channels"] == [candidate["channel"]]
             and decision["start_sample"] == candidate["start_sample"]
             and decision["end_sample"] == candidate["end_sample"]
@@ -295,9 +300,13 @@ def review_candidates(qc, prepared, quality):
         "early_cleaning": prepared["signature"],
         "signal_quality": quality.get("signature"),
     }
-    for resolution in qc["candidate_resolutions"]:
-        candidate = resolution["candidate"]
-        if candidate["preparation_signature"] == signatures[candidate["source_stage"]]:
+    for resolution in qc.get("candidate_resolutions", []):
+        candidate = resolution.get("candidate")
+        if (
+            candidate is not None
+            and candidate["preparation_signature"]
+            == signatures[candidate["source_stage"]]
+        ):
             candidates.setdefault(candidate["id"], candidate)
     return sorted(candidates.values(), key=lambda item: (item["start_sample"], item["channel"], item["source_stage"]))
 

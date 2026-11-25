@@ -2,7 +2,6 @@
 
 import math
 from copy import deepcopy
-from textwrap import fill
 
 import matplotlib
 import numpy as np
@@ -13,9 +12,6 @@ from ..config import BELTS, window_samples
 from ..logging import logger
 from .annotations import (
     RATINGS,
-    active_candidate_resolutions,
-    review_candidates,
-    unresolved_candidate_mask,
     make_interval,
     merge_artifact_intervals,
     continuous_runs,
@@ -31,30 +27,13 @@ from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessm
 
 DISPLAY_MODES = ("original", "cleaned", "preprocessed")
 DISPLAY_LABELS = ("Original", "Cleaned", "Preprocessed + Original")
-CANDIDATE_REASONS = {
-    "paired_peak_protection": "Optional paired-peak safeguard (not physiological evidence)",
-    "too_long_to_reconstruct": "Too long to interpolate safely",
-    "incompatible_flanks": "Incompatible interpolation endpoints",
-    "missing_or_boundary_flank": "Missing or boundary interpolation endpoint",
-    "boundary_or_duration_limit": "Boundary or safe interpolation duration exceeded",
-    "insufficient_flanks": "Insufficient reliable interpolation endpoints",
-    "nonfinite_event_or_flanks": "Missing values in event or interpolation endpoints",
-    "does_not_return_to_baseline": "No reliable return to the previous level",
-    "insufficient_excursion": "Ambiguous excursion",
-    "unstable_flanks": "Unstable interpolation endpoints",
-    "nonflat_long_event": "Ambiguous long event",
-    "residual_high_frequency_noise": "Residual high-frequency noise after preprocessing",
-    "unstable_noise_energy": "Unstable high-frequency noise energy",
-    "possible_sensor_clipping": "Possible repeated sensor-rail clipping",
-    "constant_waveform": "Constant digital waveform; technical review needed",
-}
 
 
 class ManualQCEditor:
     """Edit a private QC copy; only Save/Done returns accepted annotations.
 
-    Navigation renders a bounded, optionally thinned viewport. Drag coordinates
-    are converted directly to native samples, independently of drawing density.
+    Navigation renders a bounded viewport; <=10 s views retain every sample.
+    Drag coordinates are converted directly to native samples, independently of drawing density.
     Explicitly confirming the visible window records coverage for all displayed
     channels; simply viewing or navigating never marks samples clean.
     """
@@ -102,9 +81,6 @@ class ManualQCEditor:
         if recording_identity(self.preview.recording) != recording_identity(recording):
             raise ValueError("Preprocessed preview does not match this recording")
         self.preview_error = None
-        self.candidates = []
-        self.candidate_index = 0
-        self._update_candidates()
         self.result = None
         self.start = 0
         self.window = min(
@@ -120,7 +96,9 @@ class ManualQCEditor:
             len(self.channels), 1, sharex=True, figsize=(14, 9), squeeze=False
         )
         self.axes = axes[:, 0]
-        self.figure.subplots_adjust(left=0.09, right=0.74, top=0.92, bottom=0.35, hspace=0.12)
+        self.figure.subplots_adjust(
+            left=0.09, right=0.74, top=0.92, bottom=0.28, hspace=0.12
+        )
         self.figure.canvas.manager.set_window_title(
             f"DBAT preprocessing QC — {recording.recording_id}"
         )
@@ -130,25 +108,31 @@ class ManualQCEditor:
             fontsize=11,
         )
         self.original_lines = [
-            axis.plot([], [], lw=0.65, color="0.65", label="Original")[0] for axis in self.axes
+            axis.plot(
+                [],
+                [],
+                lw=0.95,
+                color="0.45",
+                ls="--",
+                alpha=0.8,
+                zorder=2,
+                label="Original",
+            )[0]
+            for axis in self.axes
         ]
         self.lines = [
-            axis.plot([], [], lw=0.75, color="tab:blue", label="Displayed")[0] for axis in self.axes
+            axis.plot([], [], lw=1.25, color="#0063cc", zorder=3, label="Preprocessed")[
+                0
+            ]
+            for axis in self.axes
         ]
-        self.axes[0].legend(
-            handles=[
-                self.original_lines[0],
-                self.lines[0],
-                Patch(facecolor="teal", alpha=0.2, hatch="//", label="Interpolated"),
-                Patch(facecolor="orange", alpha=0.2, label="Early candidate"),
-                     Patch(facecolor="purple", alpha=0.2, label="Residual noise"),
-            ],
-            loc="upper right",
-            fontsize=7,
-            ncol=2,
-        )
+        self.legend_shading = [
+            Patch(facecolor="teal", alpha=0.2, hatch="//", label="Interpolated"),
+            Patch(facecolor="orange", alpha=0.2, label="Early candidate"),
+            Patch(facecolor="purple", alpha=0.2, label="Residual noise"),
+        ]
         self.axes[-1].set_xlabel("Time (seconds); annotations use native samples")
-        self.status = self.figure.text(0.09, 0.155, "", fontsize=9)
+        self.status = self.figure.text(0.09, 0.185, "", fontsize=9)
         self.figure.text(0.79, 0.955, "Reviewer (required to save)", fontsize=9)
         self.reviewer = TextBox(
             self.figure.add_axes((0.79, 0.90, 0.19, 0.035)),
@@ -241,32 +225,12 @@ class ManualQCEditor:
         for label in self.scale_modes.labels:
             label.set_fontsize(8)
         self.scale_modes.on_clicked(self._select_scale)
-        self.candidate_info = self.figure.text(0.09, 0.228, "", fontsize=8, va="top")
-        self.candidate_previous = self._button(
-            (0.09, 0.245, 0.08, 0.035),
-            "Previous\ncandidate",
-            lambda event: self._select_candidate(-1),
+        self.figure.text(
+            0.09,
+            0.155,
+            "Orange/purple candidates are informational. Draw a red region only where you confirm an artifact.",
+            fontsize=8,
         )
-        self.candidate_next = self._button(
-            (0.18, 0.245, 0.08, 0.035), "Next\ncandidate", lambda event: self._select_candidate(1)
-        )
-        self.candidate_keep = self._button(
-            (0.28, 0.245, 0.23, 0.035),
-            "Dismiss / keep waveform",
-            lambda event: self._resolve_candidate("dismiss"),
-        )
-        self.candidate_confirm = self._button(
-            (0.53, 0.245, 0.19, 0.035),
-            "Confirm artifact",
-            lambda event: self._resolve_candidate("artifact"),
-        )
-        for button in (
-            self.candidate_previous,
-            self.candidate_next,
-            self.candidate_keep,
-            self.candidate_confirm,
-        ):
-            button.label.set_fontsize(8)
         self._button((0.79, 0.040, 0.09, 0.035), "Save / Done", self._save)
         self._button((0.89, 0.040, 0.09, 0.035), "Cancel", self._cancel)
         self.slider = Slider(
@@ -302,6 +266,8 @@ class ManualQCEditor:
             for axis, name in zip(self.axes, self.channels, strict=True)
         ]
         self._draw()
+        for axis in self.axes:
+            axis.callbacks.connect("xlim_changed", self._view_limits_changed)
         # Native maximization follows the current monitor's available screen area.
         window = getattr(self.figure.canvas.manager, "window", None)
         if hasattr(window, "showMaximized"):  # Qt
@@ -339,12 +305,22 @@ class ManualQCEditor:
             self.slider.eventson = False
             self.slider.set_val(self.start)
             self.slider.eventson = True
-        if self.candidates:
-            selected = self.candidates[self.candidate_index]
-            if selected["end_sample"] <= self.start or selected["start_sample"] >= self.start + self.window:
-                self.candidate_index = next((index for index, item in enumerate(self.candidates)
-                    if item["end_sample"] > self.start and item["start_sample"] < self.start + self.window), self.candidate_index)
         self._draw()
+
+    def _view_limits_changed(self, axis):
+        """Redraw actual visible samples after toolbar zoom/pan, using native bounds."""
+        lower, upper = sorted(axis.get_xlim())
+        count, fs_hz = len(self.recording.samples), self.recording.fs_hz
+        window = min(count, max(2, math.ceil((upper - lower) * fs_hz - 1e-9)))
+        start = max(0, min(count - window, math.floor(lower * fs_hz + 1e-9)))
+        if (start, window) == (self.start, self.window):
+            return
+        self.window = window
+        value = window if self.settings["window_unit"] == "samples" else window / fs_hz
+        self.window_box.eventson = False
+        self.window_box.set_val(str(value))
+        self.window_box.eventson = True
+        self._navigate(start)
 
     def _move(self, direction):
         """Advance one viewport without creating inspected coverage."""
@@ -458,20 +434,6 @@ class ManualQCEditor:
         self.scale_mode = label.lower()
         self._draw()
 
-    def _update_candidates(self):
-        """Refresh one review list for early and final-stage warnings and audit snapshots."""
-        selected = (
-            self.candidates[self.candidate_index]["id"] if self.candidates else None
-        )
-        self.candidates = [
-            item
-            for item in review_candidates(
-                self.qc, self.prepared, self.preview.signal_quality
-            )
-            if item["channel"] in self.channels
-        ]
-        self.candidate_index = next((index for index, item in enumerate(self.candidates) if item["id"] == selected), 0)
-
     def _refresh_preview(self):
         """Recompute private decisions; failed previews are cleared, never reused."""
         qc = deepcopy(self.qc)
@@ -487,70 +449,7 @@ class ManualQCEditor:
             )
         except (ValueError, FloatingPointError) as error:
             self.preview_error = str(error)
-        if self.preview is not None:
-            self._update_candidates()
         self._draw()
-
-    def _select_candidate(self, direction):
-        """Select a consolidated candidate and centre its native interval in view."""
-        if not self.candidates:
-            return
-        self.candidate_index = (self.candidate_index + direction) % len(self.candidates)
-        candidate = self.candidates[self.candidate_index]
-        centre = (candidate["start_sample"] + candidate["end_sample"]) // 2
-        self.slider.set_val(
-            max(0, min(centre - self.window // 2, len(self.recording.samples) - self.window))
-        )
-
-    def _resolve_candidate(self, decision):
-        """Dismiss a warning or confirm a native artifact, retaining its evidence."""
-        reviewer = self._reviewer_name()
-        if not reviewer or not self.candidates:
-            return
-        candidate = self.candidates[self.candidate_index]
-        if (
-            candidate["end_sample"] <= self.start
-            or candidate["start_sample"] >= self.start + self.window
-        ):
-            self._select_candidate(0)
-            return
-        if candidate["id"] in active_candidate_resolutions(self.qc, self.prepared, self.candidates):
-            return
-        resolution = make_interval(
-            candidate["start_sample"],
-            candidate["end_sample"],
-            [candidate["channel"]],
-            self.recording.fs_hz,
-            reviewer,
-        )
-        resolution.update(
-            candidate_id=candidate["id"],
-            decision=decision,
-            preparation_signature=candidate["preparation_signature"],
-            source_stage=candidate["source_stage"], candidate=deepcopy(candidate),
-            reasons=candidate["reasons"].copy(),
-        )
-        self.qc.setdefault("candidate_resolutions", []).append(resolution)
-        self.qc["edit_history"].append(
-            {
-                "action": "resolve_candidate",
-                "resolution": deepcopy(resolution),
-                "reviewer": reviewer,
-                "created_at_utc": resolution["created_at_utc"],
-            }
-        )
-        if decision == "artifact":
-            interval = make_interval(
-                candidate["start_sample"],
-                candidate["end_sample"],
-                [candidate["channel"]],
-                self.recording.fs_hz,
-                reviewer,
-            )
-            interval["candidate_id"] = candidate["id"]
-            self.qc["artifacts"].append(interval)
-            merge_artifact_intervals(self.qc, self.recording.fs_hz, reviewer)
-        self._refresh_preview()
 
     def _add_artifact(self, low, high, name):
         """Add native [start,end) bounds, merging overlaps and retaining their history."""
@@ -617,17 +516,32 @@ class ManualQCEditor:
             self._refresh_preview()
 
     def _draw(self):
-        """Draw native/processed seconds, independent of native annotation indexing."""
+        """Draw informational shading and true samples; short views are never thinned."""
         end = self.start + self.window
         lower, upper = self.start / self.recording.fs_hz, end / self.recording.fs_hz
-        native_step = max(1, math.ceil(self.window / self.settings["max_plot_points"]))
+        full_detail = self.window <= 10 * self.recording.fs_hz
+        native_step = (
+            1
+            if full_detail
+            else max(1, math.ceil(self.window / self.settings["max_plot_points"]))
+        )
         native_indices = np.arange(self.start, end, native_step)
         if self.display_mode == "preprocessed" and self.preview is not None:
-            times, displayed = self.preview.processed_time_sec, self.preview.preproc_signal
+            times, displayed = (
+                self.preview.processed_time_sec,
+                self.preview.preproc_signal,
+            )
             first, last = np.searchsorted(times, [lower, upper])
-            step = max(1, math.ceil((last - first) / self.settings["max_plot_points"]))
+            step = (
+                1
+                if full_detail
+                else max(
+                    1, math.ceil((last - first) / self.settings["max_plot_points"])
+                )
+            )
             indices = np.arange(first, last, step)
         elif self.display_mode == "preprocessed":
+            first = last = 0
             times, displayed, indices = (
                 self.recording.time_sec,
                 self.corrected,
@@ -635,16 +549,22 @@ class ManualQCEditor:
             )
         else:
             times = self.recording.time_sec
-            displayed = self.corrected if self.display_mode == "cleaned" else self.recording.samples
+            displayed = (
+                self.corrected
+                if self.display_mode == "cleaned"
+                else self.recording.samples
+            )
             first, last, indices = self.start, end, native_indices
         limits = {}
         for name, column in zip(self.channels, self.columns, strict=True):
-            values = displayed[indices, column]
+            values = displayed[first:last, column]
             if self.display_mode == "preprocessed":
-                values = np.r_[values, self.recording.samples[native_indices, column]]
+                values = np.r_[values, self.recording.samples[self.start : end, column]]
             finite = values[np.isfinite(values)]
             limits[name] = (
-                (float(finite.min()), float(finite.max())) if finite.size else (-1.0, 1.0)
+                (float(finite.min()), float(finite.max()))
+                if finite.size
+                else (-1.0, 1.0)
             )
         if self.scale_mode == "shared" and len(self.belt_channels) == 2:
             bounds = (
@@ -655,12 +575,19 @@ class ManualQCEditor:
         for patch in self.shading:
             patch.remove()
         self.shading.clear()
-        unresolved = unresolved_candidate_mask(self.qc, self.prepared, self.candidates)
-        unresolved_noise = unresolved_candidate_mask(self.qc, self.prepared, self.candidates, source_stage="signal_quality")
-        resolutions = active_candidate_resolutions(self.qc, self.prepared, self.candidates)
-        selected = self.candidates[self.candidate_index] if self.candidates else None
+        noise_candidates = (
+            self.preview.signal_quality["candidates"]
+            if self.preview is not None
+            else []
+        )
+        candidates = self.prepared["candidates"] + noise_candidates
         for axis, name, column, line, original in zip(
-            self.axes, self.channels, self.columns, self.lines, self.original_lines, strict=True
+            self.axes,
+            self.channels,
+            self.columns,
+            self.lines,
+            self.original_lines,
+            strict=True,
         ):
             line.set_data(times[indices], displayed[indices, column])
             if self.display_mode == "preprocessed":
@@ -670,12 +597,15 @@ class ManualQCEditor:
                 )
             else:
                 original.set_data([], [])
+            line.get_path().should_simplify = False
+            original.get_path().should_simplify = False
             for mask, color, hatch in (
                 (self.prepared["masks"]["interpolated"], "teal", "//"),
-                (unresolved, "orange", None),
-                (unresolved_noise, "purple", None),
+                (self.prepared["masks"]["auto_candidate"], "orange", None),
             ):
-                for first_flag, last_flag in continuous_runs(mask[self.start : end, column]):
+                for first_flag, last_flag in continuous_runs(
+                    mask[self.start : end, column]
+                ):
                     self.shading.append(
                         axis.axvspan(
                             (self.start + first_flag) / self.recording.fs_hz,
@@ -686,16 +616,20 @@ class ManualQCEditor:
                             hatch=hatch,
                         )
                     )
-            if selected and selected["channel"] == name and selected["id"] not in resolutions:
-                self.shading.append(
-                    axis.axvspan(
-                        selected["start_sec"],
-                        selected["end_sec"],
-                        facecolor="none",
-                        edgecolor="purple" if selected["source_stage"] == "signal_quality" else "darkorange",
-                        lw=1.7,
+            for candidate in noise_candidates:
+                if (
+                    candidate["channel"] == name
+                    and candidate["end_sec"] > lower
+                    and candidate["start_sec"] < upper
+                ):
+                    self.shading.append(
+                        axis.axvspan(
+                            candidate["start_sec"],
+                            candidate["end_sec"],
+                            facecolor="purple",
+                            alpha=0.18,
+                        )
                     )
-                )
             low, high = limits[name]
             margin = 0.05 * (high - low) if high > low else max(0.1, abs(low) * 0.05)
             axis.set_ylim(low - margin, high + margin)
@@ -713,7 +647,10 @@ class ManualQCEditor:
                     ):
                         self.shading.append(
                             axis.axvspan(
-                                interval["start_sec"], interval["end_sec"], color=color, alpha=alpha
+                                interval["start_sec"],
+                                interval["end_sec"],
+                                color=color,
+                                alpha=alpha,
                             )
                         )
         for mode, label in zip(DISPLAY_MODES, self.display_modes.labels, strict=True):
@@ -742,31 +679,33 @@ class ManualQCEditor:
             if unresolved_polarity:
                 diagnostic += "\nPolarity unresolved: unflipped preview"
             self.polarity_diagnostic.set_text(diagnostic)
-        if selected:
-            resolution = resolutions.get(selected["id"])
-            visible_candidate = (
-                selected["end_sample"] > self.start and selected["start_sample"] < end
-            )
-            state = resolution["decision"] if resolution else "unresolved"
-            if not visible_candidate:
-                state += " (outside view; use candidate navigation)"
-            reason = "; ".join(
-                CANDIDATE_REASONS.get(code, code.replace("_", " ")) for code in selected["reasons"]
-            )
-            self.candidate_info.set_text(
-                f"{'Residual noise' if selected['source_stage'] == 'signal_quality' else 'Early candidate'} {self.candidate_index + 1}/{len(self.candidates)} | {selected['channel']} | {selected['start_sec']:.2f}–{selected['end_sec']:.2f} s | {state}\n"
-                + fill(reason, 110)
-            )
-        else:
-            self.candidate_info.set_text("No automatic candidates on displayed channels.")
-        for button in (self.candidate_keep, self.candidate_confirm):
-            button.active = bool(
-                selected and visible_candidate and selected["id"] not in resolutions
-            )
-            button.ax.set_facecolor("0.95" if button.active else "0.85")
-        self.candidate_previous.active = self.candidate_next.active = bool(self.candidates)
-        self.axes[-1].set_xlim(lower, upper)
-        message = f"Native samples [{self.start}, {end}) | {len(self.qc['artifacts'])} manual artifacts | {len(self.candidates) - len(resolutions.keys() & {item['id'] for item in self.candidates})} unresolved candidates"
+        self.lines[0].set_label(
+            {
+                "original": "Original",
+                "cleaned": "Cleaned",
+                "preprocessed": "Preprocessed",
+            }[self.display_mode]
+        )
+        waveform_handles = (
+            [self.original_lines[0], self.lines[0]]
+            if self.display_mode == "preprocessed"
+            else [self.lines[0]]
+        )
+        self.axes[0].legend(
+            handles=waveform_handles + self.legend_shading,
+            loc="upper right",
+            fontsize=7,
+            ncol=2,
+        )
+        for axis in self.axes:
+            axis.set_xlim(lower, upper, emit=False)
+        visible = sum(
+            item["channel"] in self.channels
+            and item["end_sample"] > self.start
+            and item["start_sample"] < end
+            for item in candidates
+        )
+        message = f"Native samples [{self.start}, {end}) | {len(self.qc['artifacts'])} manual artifacts | {visible} automatic candidates in view"
         if self.preview_error:
             message += f"\nFinal preview unavailable: {self.preview_error}"
         self._message(message)
@@ -832,8 +771,10 @@ def run_qc_gui(recording, config, qc_annotations=None, prepared=None, preview=No
             "Manual QC needs an interactive Matplotlib backend; on Windows set MPLBACKEND=TkAgg"
         )
     logger.info("  Manual QC for %s...", recording.recording_id)
-    editor = ManualQCEditor(recording, config, qc_annotations, prepared, preview)
-    plt.show(block=True)
+    # Also prevent renderer-side simplification of long full-detail paths.
+    with matplotlib.rc_context({"path.simplify": False}):
+        editor = ManualQCEditor(recording, config, qc_annotations, prepared, preview)
+        plt.show(block=True)
     if editor.result is None:
         logger.info("Cancelled QC for %s; session edits discarded.", recording.recording_id)
     return editor.result

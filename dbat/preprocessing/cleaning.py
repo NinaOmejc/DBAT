@@ -20,7 +20,16 @@ from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
-ALGORITHM_VERSION = "dbat_auto_cleaning_v2"
+ALGORITHM_VERSION = "dbat_auto_cleaning_v3"
+BELT_MORPHOLOGY = {
+    "context_sec": 2.0,
+    "minimum_flank_sec": 0.25,
+    "slope_guard_sec": 0.05,
+    "respiratory_min_width_sec": 0.35,
+    "respiratory_max_residual_fraction": 0.3,
+    "spike_max_width_sec": 0.1,
+    "spike_min_slope_ratio": 4.0,
+}
 
 
 def robust_scale(values):
@@ -105,14 +114,84 @@ def _event(start, end, fs_hz, action, reason):
     }
 
 
+def _spike_morphology(values, residual, start, end, fs_hz):
+    """Require narrow, abrupt single-channel morphology before interpolation.
+
+    Parameters
+    ----------
+    values, residual : ndarray, shape (native_samples,)
+        Source waveform and existing median-filter residual; neither is modified.
+    start, end : int
+        Half-open candidate bounds on the native grid.
+    fs_hz : float
+        Native sampling rate in Hz.
+
+    Returns
+    -------
+    tuple
+        Preservation reason (None only for a confident spike) and numeric
+        evidence. Broad smooth extrema and uncertain shapes stay unchanged.
+        Width/prominence use SciPy on the actual local waveform in either sign:
+        https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.find_peaks.html
+    """
+    parameters = BELT_MORPHOLOGY
+    context = max(1, round(parameters["context_sec"] * fs_hz))
+    first, last = max(0, start - context), min(len(values), end + context)
+    minimum = parameters["minimum_flank_sec"] * fs_hz
+    local = values[first:last]
+    if start - first < minimum or last - end < minimum or not np.isfinite(local).all():
+        return "uncertain_spike_morphology", {"status": "insufficient_finite_context"}
+    tip = start + int(np.argmax(abs(residual[start:end])))
+    direction = 1 if residual[tip] >= 0 else -1
+    peaks, properties = find_peaks(
+        direction * local, prominence=(None, None), width=(None, None)
+    )
+    inside = np.flatnonzero((peaks + first >= start) & (peaks + first < end))
+    if not len(inside):
+        return "uncertain_spike_morphology", {"status": "no_isolated_extremum"}
+    index = inside[np.argmax(properties["prominences"][inside])]
+    width = float(properties["widths"][index] / fs_hz)
+    prominence = float(properties["prominences"][index])
+    slopes = abs(np.diff(local))
+    guard = max(1, round(parameters["slope_guard_sec"] * fs_hz))
+    surrounding = np.r_[
+        slopes[: max(0, start - first - guard)], slopes[end - first + guard :]
+    ]
+    typical = max(float(np.percentile(surrounding, 95)), 1e-10)
+    abruptness = float(np.max(slopes[start - first - 1 : end - first]) / typical)
+    residual_fraction = float(abs(residual[tip]) / max(prominence, 1e-10))
+    evidence = {
+        "status": "assessed",
+        "peak_sample": int(first + peaks[index]),
+        "width_sec": width,
+        "prominence": prominence,
+        "slope_ratio": abruptness,
+        "residual_fraction": residual_fraction,
+    }
+    if (
+        width >= parameters["respiratory_min_width_sec"]
+        and residual_fraction <= parameters["respiratory_max_residual_fraction"]
+        and abruptness < parameters["spike_min_slope_ratio"]
+    ):
+        return "plausible_respiratory_peak", evidence
+    if (
+        width <= parameters["spike_max_width_sec"]
+        and abruptness >= parameters["spike_min_slope_ratio"]
+        and prominence >= abs(residual[tip])
+    ):
+        return None, evidence
+    return "uncertain_spike_morphology", evidence
+
+
 def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
     """Interpolate only brief residual spikes with finite, compatible flanks.
 
     Returns corrected values, interpolation/candidate masks, events and detector
-    parameters. Optional paired peaks remain protected. Baseline-displacement
-    detection is absent; detrending owns baseline correction. Detection is adapted
-    from the latest supplied test_cleaning.py;
-    the fixed 50-sample flank lag is replaced with 0.25 * fs_hz.
+    parameters. Single-channel width, prominence and slopes protect plausible
+    broad respiratory extrema; uncertain shapes remain candidates. Optional
+    paired peaks remain protected. Baseline-displacement detection is absent;
+    detrending owns baseline correction. Detection is adapted from the supplied
+    test_cleaning.py; the fixed flank lag is replaced with 0.25 * fs_hz.
     """
     corrected = values.copy()
     interpolated = np.zeros(len(values), dtype=bool)
@@ -125,7 +204,9 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
         return corrected, interpolated, candidates, events, info
     safe = _estimation_signal(values)
     residual = safe - median_filter(safe, size=odd_samples(0.40, fs_hz), mode="nearest")
-    threshold = max(10 * robust_scale(residual), 4 * np.percentile(np.abs(residual), 99), 1e-10)
+    threshold = max(
+        10 * robust_scale(residual), 4 * np.percentile(np.abs(residual), 99), 1e-10
+    )
     seeds = finite & (np.abs(residual) > threshold)
     initial = binary_dilation(seeds, iterations=max(1, round(0.035 * fs_hz))) & finite
     groups = []
@@ -135,8 +216,11 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
         else:
             groups.append((start, end))
     typical_change = np.percentile(np.abs(safe[lag:] - safe[:-lag]), 95)
-    flank_limit = max(3 * np.percentile(np.abs(residual), 95), 2 * typical_change, 1e-10)
+    flank_limit = max(
+        3 * np.percentile(np.abs(residual), 95), 2 * typical_change, 1e-10
+    )
     for start, end in groups:
+        morphology = None
         near_pair = np.any(
             (paired_times > start - round(fs_hz)) & (paired_times < end + round(fs_hz))
         )
@@ -149,14 +233,21 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
         elif abs(values[start - 1] - values[end]) > flank_limit:
             reason = "incompatible_flanks"
         else:
+            reason, morphology = _spike_morphology(values, residual, start, end, fs_hz)
+        if reason is None:
             corrected[start:end] = np.interp(
-                np.arange(start, end), [start - 1, end], [values[start - 1], values[end]]
+                np.arange(start, end),
+                [start - 1, end],
+                [values[start - 1], values[end]],
             )
             interpolated[start:end] = True
-            events.append(_event(start, end, fs_hz, "interpolated", "brief_isolated_spike"))
-            continue
-        candidates[start:end] = True
-        events.append(_event(start, end, fs_hz, "review_candidate", reason))
+            event = _event(start, end, fs_hz, "interpolated", "brief_isolated_spike")
+        else:
+            candidates[start:end] = True
+            event = _event(start, end, fs_hz, "review_candidate", reason)
+        if morphology is not None:
+            event["morphology"] = morphology
+        events.append(event)
     candidates &= finite & ~interpolated
     info = {
         "status": "assessed",
@@ -371,6 +462,7 @@ def clean_recording(recording, config):
         "belt_dilation_sec": 0.035,
         "belt_group_gap_sec": 0.6,
         "belt_flank_lag_sec": 0.25,
+        "belt_morphology": dict(BELT_MORPHOLOGY),
         "paired_gaussian_sigma_sec": 0.10,
         "paired_baseline_sec": 20,
         "paired_width_sec": [0.6, 8],

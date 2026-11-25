@@ -235,6 +235,17 @@ finite, compatible, bounded spikes lasting at most `belt_max_interpolation_sec`
 flagged for review. **Sustained baseline-displacement detection is removed** from
 this stage; baseline correction belongs only to `detrending.py`.
 
+Before interpolation, a single-channel morphology safeguard measures local
+half-prominence peak width, prominence, median-residual fraction and slope
+abruptness in up to 2 s of finite context on either side. Broad, smooth extrema
+(width >=0.35 s, residual <=30% of prominence, slope ratio <4) are preserved as
+plausible respiratory peaks. Interpolation additionally requires a narrow extremum
+(width <=0.10 s), slopes at least four times the surrounding 95th-percentile slope,
+and prominence at least the residual amplitude. Uncertain morphology or inadequate
+finite context remains unchanged and flagged. Both signs are checked; belt
+synchronization is unnecessary. These are conservative technical safeguards,
+not breath/sigh labels. Numeric evidence and parameters are saved in provenance.
+
 `paired_breath_protection = false` is the default. Enabling it retains the existing
 paired-peak safeguard (0.6–8 s widths, centres within 1.5 s) solely to prevent
 interpolation near paired events. Synchronization is never physiological evidence
@@ -285,7 +296,9 @@ timestamps are saved separately from the manual QC evidence.
   display order. Change this list to review other channels. All six native channels
   remain available in the original source file; final outputs use the processed grid. Slider, Previous/Next and zoom buttons move
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
-  200 Hz; `600` seconds is **120000 samples**. Drawing alone may be thinned.
+  200 Hz; `600` seconds is **120000 samples**. Longer views may be thinned;
+  views of 10 s or less draw every native/processed sample without path simplification.
+  Toolbar zoom/pan also refreshes samples for the actual visible interval.
 - The GUI opens maximized to the current monitor's available screen area on the
   standard Windows Tk/Qt/wx backends. Normal window controls remain available.
 - Enter a reviewer. **Rate individual channels** shows one row per displayed
@@ -311,23 +324,18 @@ timestamps are saved separately from the manual QC evidence.
   before confirming. Repeat through the recording for full coverage.
 - **Waveform view** has three radio choices: **Original** (unchanged `.dat`),
   **Cleaned** (automatic interpolation plus the current polarity, before detrending),
-  and **Preprocessed + Original** (default; actual final `preproc_signal` with a gray
-  original overlay). A separate **Belt scale** radio group chooses **Shared** or
+  and **Preprocessed + Original** (default; actual final `preproc_signal` in strong
+  solid blue, slightly thicker and drawn above the moderately visible dashed gray
+  original). Matching legend entries identify both curves. A separate **Belt scale** radio group chooses **Shared** or
   **Independent** limits. Blue bold labels identify the active view and scale.
   All curves use seconds, even when original and processed sampling rates differ;
   manual interval bounds always use the original native grid.
-- **Previous/Next candidate** selects and centres each consolidated automatic warning.
-  The interval, channel, detector reason(s) and resolution are shown. Decisions are
-  enabled only while the selected candidate is visible. **Dismiss / keep waveform** retains numerical values and removes its unresolved warning without
-  marking unrelated samples inspected. **Confirm artifact** creates a native manual
-  annotation and excludes it through validity masks, without new interpolation.
-  Original detections, protection reasons and interpolation evidence remain in
-  provenance; explicit decisions retain reviewer/time and preparation identity.
-  Teal hatching identifies initial interpolation, orange early unresolved
-  candidates, and purple final residual-noise candidates. Candidate reasons and
-  reviewer decisions retain their source stage. Resolved candidates remain available for inspection.
-  Removing a confirmed candidate's manual artifact reopens its warning; the prior
-  decision remains in the audit history.
+- Automatic candidates are **informational only**: teal hatching shows initial
+  interpolation, orange shading shows early candidates, and purple shading shows
+  residual-noise candidates. There are no candidate-selection, confirmation or
+  dismissal controls. Agree with a warning by manually drawing a red artifact;
+  disagree by leaving the waveform unchanged. Existing QC resolution records are
+  retained when loading/saving older annotations, but never hide candidate shading.
 - The polarity section is shown only when
   `preprocessing.check_relative_belt_polarity = true`. Hiding it preserves any
   previously accepted decision and creates no new polarity decision.
@@ -361,7 +369,7 @@ used only in memory for conditioning and impact metrics.
 `prepared["corrected"]` remains a temporary, source-oriented input for initial
 technical QC and polarity assessment; it is not saved as a fourth canonical signal.
 The GUI opens after the complete provisional detrending/filtering/resampling/
-smoothing chain. Rating, coverage, artifact, candidate and polarity edits refresh
+smoothing chain. Rating, coverage, artifact and polarity edits refresh
 its final preview and masks. On acceptance the workflow writes recoverable QC,
 then recomputes the accepted result; the writer rejects provisional previews.
 A failed preview is cleared and reported rather than silently reused.
@@ -486,8 +494,9 @@ under `metadata_json.signal_quality` (also `summary.json.signal_quality`), with
 recording medians, robust dB noise variability and flagged-window proportions.
 `processing.signal_quality` records settings, algorithm and summaries. There is
 no combined 0–1 quality score. `flag_candidates=false` keeps metrics/threshold
-flags while disabling GUI warning generation. Decisions retain their original
-candidate evidence, stage, reviewer and time. No classification features are built.
+flags while disabling GUI warning generation. Detection evidence retains its
+stage and reasons. Older reviewer-resolution records remain in QC unchanged;
+new artifact decisions use ordinary manual red intervals. No classification features are built.
 
 ## Preprocessing-impact MAE (separate from noisiness)
 
@@ -636,8 +645,9 @@ unreviewed runs also store `qc.json`, explicitly without acceptance or invented 
 
 QC overrides accept current `qc.json` or current `summary.json`. Automatic
 discovery validates identity, source hash and the native grid. Current formats
-are **`dbat_preprocessing_v5`** and **`dbat_qc_v2`**. Older readers, mappings and
-legacy QC-folder discovery have been removed. Existing files are not migrated,
+are **`dbat_preprocessing_v5`** and **`dbat_qc_v2`**. Standalone QC JSON from
+`dbat_qc_v1` also remains readable, including prior candidate resolutions. Older
+HDF5 mappings and legacy QC-folder discovery remain removed. Existing files are not migrated,
 overwritten or deleted; regenerate outputs using the current pipeline.
 
 `SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v5`**:
