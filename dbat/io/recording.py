@@ -26,7 +26,7 @@ from ..preprocessing.annotations import (
 )
 
 
-PREPROCESSING_ALGORITHM = "dbat_preprocessing_v6"
+PREPROCESSING_ALGORITHM = "dbat_preprocessing_v7"
 
 
 @dataclass(frozen=True)
@@ -398,6 +398,7 @@ def load_reusable_preprocessing_result(recording, config, qc):
                 "reviewed",
                 "interpolated",
                 "auto_candidate",
+                "unresolved_candidate",
                 "finite",
                 "quality_selected",
                 "uncertain",
@@ -563,6 +564,8 @@ def save_preprocessing_result(result, config, *, run_dir=None):
     processing/write failure. Direct callers reserve a run here; unreviewed QC is
     stored as explicitly unaccepted. Failed writes remain recoverable in place.
     """
+    if result.provenance.get("provisional"):
+        raise ValueError("A provisional GUI preview cannot be saved; recompute accepted QC first")
     if config["output"]["schema_version"] != RESULT_SCHEMA:
         raise ValueError(f"New results must use {RESULT_SCHEMA}")
     recording = result.recording
@@ -648,7 +651,7 @@ def save_preview(result, config, path):
             result.processed_time_sec[processed_indices], result.preproc_signal[processed_indices, column],
             lw=0.8, label="Final preprocessed signal",
         )
-        for key, color in (("interpolated", "teal"), ("auto_candidate", "orange")):
+        for key, color in (("interpolated", "teal"), ("unresolved_candidate", "orange")):
             for begin, finish in continuous_runs(result.masks[key][first:last, column]):
                 axis.axvspan((first + begin) / result.processed_fs_hz, (first + finish) / result.processed_fs_hz,
                              color=color, alpha=0.18)
@@ -701,10 +704,11 @@ def preprocessing_provenance(result, config, prepared, decision):
         "filtering": filter_details,
         "smoothing": smoothing_parameters,
         "resampling": resampling,
-        "processing_order": "automatic correction; accepted polarity; native detrend; native highpass; native lowpass; optional resampling; one processed-grid smoothing pass",
+        "processing_order": "automatic correction; source-relative polarity; native detrend; native highpass; native lowpass; optional resampling; one processed-grid smoothing pass",
         "edge_policy": "Moving mean shrinks at recording ends with valid numerical support; genuine gap/artifact influence stays unsupported. Optional IIR filters cross QC/artifact flags; reflection guards at recording ends or genuine missing gaps remain unsupported.",
         "signal_policy": "Numerical conditioning is independent of channel ratings, QC channel selection and reviewed coverage",
         "processing_skips": processing_skips,
+        "qc_preview_policy": "When needed, QC reviews complete provisional preprocessing; accepted decisions are recomputed before saving",
         "respiratory_analysis_source": "preproc_signal",
         "respiratory_analysis_fs_hz": processed_fs,
         "respiratory_analysis_policy": "Every future respiratory detector/analysis uses preproc_signal, processed_fs_hz and valid/interpolated masks; no second general smoothing pass",

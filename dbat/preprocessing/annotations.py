@@ -48,6 +48,7 @@ def new_qc_annotations(recording, reviewer=""):
         "channel_ratings": dict.fromkeys(recording.channels, "unassessed"),
         "rating_provenance": {},
         "artifacts": [],
+        "candidate_resolutions": [],
         "reviewed_intervals": [],
         "edit_history": [],
     }
@@ -134,7 +135,7 @@ def review_status(qc):
     return "reviewed_clean" if qc["reviewed_intervals"] else "not_reviewed"
 
 
-def validate_qc_annotations(qc, recording):
+def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
     """Validate native identity, interval coordinates, ratings and provenance.
 
     No intervals are clipped, silently repaired, or promoted to clean evidence.
@@ -155,8 +156,18 @@ def validate_qc_annotations(qc, recording):
             provenance = qc.get("rating_provenance", {}).get(name, {})
             if not provenance.get("reviewer", "").strip() or not provenance.get("created_at_utc"):
                 raise ValueError(f"QC rating for {name} lacks reviewer/time provenance")
+    for resolution in qc.get("candidate_resolutions", []):
+        if (
+            resolution.get("decision") not in {"dismiss", "artifact"}
+            or not resolution.get("candidate_id")
+            or len(resolution.get("preparation_signature", "")) != 64
+            or not resolution.get("reasons")
+        ):
+            raise ValueError(
+                "Candidate resolution needs a decision and original detection provenance"
+            )
     identifiers = set()
-    for field in ("artifacts", "reviewed_intervals"):
+    for field in ("artifacts", "reviewed_intervals", "candidate_resolutions"):
         for interval in qc.get(field, []):
             start, end = interval["start_sample"], interval["end_sample"]
             if (
@@ -190,10 +201,15 @@ def validate_qc_annotations(qc, recording):
             has_evidence = True
     decision = qc.get("polarity")
     if decision is not None:
-        if "choice" not in decision or decision["choice"] not in (None, "Resp-Lungs", "Resp-Diaphragm"):
+        if "choice" not in decision or decision["choice"] not in (
+            None,
+            "Resp-Lungs",
+            "Resp-Diaphragm",
+        ):
             raise ValueError("Invalid manual belt-polarity choice")
         if (
-            not decision.get("reviewer", "").strip() or not decision.get("created_at_utc")
+            not decision.get("reviewer", "").strip()
+            or not decision.get("created_at_utc")
             or decision.get("source") != "dbat_manual_qc"
             or not isinstance(decision.get("preparation_signature"), str)
             or len(decision["preparation_signature"]) != 64
@@ -201,22 +217,32 @@ def validate_qc_annotations(qc, recording):
         ):
             raise ValueError("Polarity decision lacks reviewer/time/source/cleaning provenance")
         assessment = decision.get("assessment", {})
-        if assessment.get("polarity_warning") and decision["choice"] is None and not decision["acknowledged_warning"]:
-            raise ValueError("Keeping None under a polarity warning requires explicit acknowledgement")
+        if (
+            not allow_unaccepted
+            and assessment.get("polarity_warning")
+            and decision["choice"] is None
+            and not decision["acknowledged_warning"]
+        ):
+            raise ValueError(
+                "Keeping None under a polarity warning requires explicit acknowledgement"
+            )
         has_evidence = True
-    if has_evidence and (not qc.get("accepted_at_utc") or not qc.get("reviewer", "").strip()):
+    if has_evidence and (
+        (not qc.get("accepted_at_utc") and not allow_unaccepted)
+        or not qc.get("reviewer", "").strip()
+    ):
         raise ValueError("Manual QC evidence requires an accepted review and a reviewer")
     if qc.get("review_status") != review_status(qc):
         raise ValueError("QC review_status disagrees with its accepted interval evidence")
 
 
-def annotation_masks(qc, recording):
+def annotation_masks(qc, recording, *, allow_unaccepted=False):
     """Union original intervals into independent (samples, channels) boolean masks.
 
     Original overlapping/touching annotations and their provenance stay intact.
     Confirmed artifacts count as inspected evidence but never as clean support.
     """
-    validate_qc_annotations(qc, recording)
+    validate_qc_annotations(qc, recording, allow_unaccepted=allow_unaccepted)
     masks = {key: np.zeros(recording.samples.shape, dtype=bool) for key in ("artifact", "reviewed")}
     for field, key in (("reviewed_intervals", "reviewed"), ("artifacts", "artifact")):
         for interval in qc[field]:
@@ -227,6 +253,39 @@ def annotation_masks(qc, recording):
                 if key == "artifact":
                     masks["reviewed"][start:end, column] = True
     return masks
+
+
+def active_candidate_resolutions(qc, prepared):
+    """Return decisions matching exact current candidate identity and native bounds."""
+    candidates = {item["id"]: item for item in prepared["candidates"]}
+    active = {}
+    for decision in qc.get("candidate_resolutions", []):
+        candidate = candidates.get(decision["candidate_id"])
+        if (
+            candidate is not None
+            and decision["preparation_signature"] == prepared["signature"]
+            and decision["channels"] == [candidate["channel"]]
+            and decision["start_sample"] == candidate["start_sample"]
+            and decision["end_sample"] == candidate["end_sample"]
+        ):
+            if decision["decision"] == "artifact" and not any(
+                decision["channels"][0] in interval["channels"]
+                and interval["start_sample"] <= decision["start_sample"]
+                and interval["end_sample"] >= decision["end_sample"]
+                for interval in qc["artifacts"]
+            ):
+                continue  # Removing the confirmed artifact reopens its warning.
+            active[candidate["id"]] = decision
+    return active
+
+
+def unresolved_candidate_mask(qc, prepared):
+    """Hide resolved warnings without altering automatic evidence or review coverage."""
+    unresolved = prepared["masks"]["auto_candidate"].copy()
+    for decision in active_candidate_resolutions(qc, prepared).values():
+        column = prepared["identity"]["channels"].index(decision["channels"][0])
+        unresolved[decision["start_sample"] : decision["end_sample"], column] = False
+    return unresolved
 
 
 def add_analysis_masks(masks, corrected, recording, qc, selected_channels, automatic_masks):

@@ -84,6 +84,7 @@ def resample_preprocessed(values, masks, native_fs, settings):
         "eligible": full_support(native_masks["eligible"]),
         "artifact": any_influence(native_masks["artifact"]),
         "auto_candidate": any_influence(native_masks["auto_candidate"]),
+        "unresolved_candidate": any_influence(native_masks["unresolved_candidate"]),
         "uncertain": any_influence(native_masks["uncertain"]) | boundary,
         "quality_selected": native_masks["quality_selected"][left].copy(),
         "missing_influence": any_influence(~native_masks["finite"]),

@@ -184,16 +184,21 @@ def assessment_text(assessment):
     )
 
 
-def orient_prepared(prepared, qc, channels):
+def orient_prepared(prepared, qc, channels, *, provisional=False):
     """Validate the saved polarity decision and orient a fresh corrected copy.
 
-    Returns oriented samples and the unchanged decision (or None). Warnings
-    still require an explicit reviewer choice or acknowledgement.
+    Returns oriented samples and the decision (or None). Provisional previews
+    use unflipped values for missing/stale choices. Final processing requires an
+    explicit choice or acknowledgement under a warning.
     """
-    decision = saved_polarity_decision(qc, prepared)
+    decision = qc.get("polarity")
+    if provisional and decision and decision["preparation_signature"] != prepared["signature"]:
+        decision = None
+    elif not provisional:
+        decision = saved_polarity_decision(qc, prepared)
     choice = decision["choice"] if decision else None
     if (
-        prepared["polarity"]["polarity_warning"]
+        not provisional and prepared["polarity"]["polarity_warning"]
         and choice is None
         and not (decision and decision["acknowledged_warning"])
     ):

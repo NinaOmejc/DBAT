@@ -1,5 +1,6 @@
 """Orchestrate correction, polarity, native conditioning, resampling and smoothing."""
 
+from copy import deepcopy
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,6 +21,8 @@ from .annotations import (
     continuous_runs as continuous_runs,
     new_qc_annotations,
     recording_identity,
+    review_status,
+    unresolved_candidate_mask,
 )
 from .cleaning import (
     clean_recording as clean_recording,
@@ -100,7 +103,9 @@ class PreprocessedRecording:
             )
 
 
-def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
+def preprocess_recording(
+    recording, config, qc_annotations=None, prepared=None, *, provisional=False
+):
     """Correct, detrend/filter natively, optionally resample once, then smooth once.
 
     Parameters
@@ -112,7 +117,10 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
     qc_annotations : dict, optional
         Native manual QC; absent review never becomes approved analysis evidence.
     prepared : dict, optional
-        Cached automatic correction/polarity result shared with initial QC.
+        Cached automatic correction/polarity result shared with QC.
+    provisional : bool, optional
+        Preview private, unaccepted edits and unresolved polarity without saving.
+        Final processing still requires accepted evidence and polarity resolution.
 
     Returns
     -------
@@ -128,15 +136,25 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
         raise ValueError("Recording fs/channel mapping disagrees with configuration")
     logger.info("  Preprocessing %s...", recording.recording_id)
     qc = qc_annotations if qc_annotations is not None else new_qc_annotations(recording)
-    masks = annotation_masks(qc, recording)
+    if provisional:
+        qc = deepcopy(qc)
+        qc["review_status"] = review_status(qc)
+    masks = annotation_masks(qc, recording, allow_unaccepted=provisional)
     prepared = prepare_recording(recording, config) if prepared is None else prepared
     if (
         prepared["identity"] != recording_identity(recording)
         or prepared["corrected"].shape != recording.samples.shape
     ):
         raise ValueError("Prepared signals do not match the source identity/native grid")
-    corrected, decision = orient_prepared(prepared, qc, recording.channels)
-    add_analysis_masks(masks, corrected, recording, qc, config["qc"]["channels"], prepared["masks"])
+    corrected, decision = orient_prepared(prepared, qc, recording.channels, provisional=provisional)
+    add_analysis_masks(
+        masks,
+        corrected,
+        recording,
+        qc,
+        config["qc"]["channels"],
+        {**prepared["masks"], "unresolved_candidate": unresolved_candidate_mask(qc, prepared)},
+    )
     settings = config["preprocessing"]
 
     preprocessed, diagnostics = detrend_and_filter_recording(corrected, recording, settings, masks)
@@ -150,6 +168,7 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
         recording, preprocessed, smoothed, processed_fs, times, masks, qc, diagnostics
     )
     result.provenance = preprocessing_provenance(result, config, prepared, decision)
+    result.provenance["provisional"] = provisional
     return result
 
 
@@ -159,6 +178,8 @@ def run_preprocessing(recording, config):
     Returns (PreprocessedRecording, HDF5 path, reused). Accepted QC is reused unless
     qc.review_again requests another GUI review. A cache hit restores only the
     final waveform; preprocessed is None when that intermediate was not stored.
+    The GUI receives complete provisional preprocessing. Its accepted decisions
+    are preserved before final recomputation; provisional arrays are never saved.
     Cancellation leaves prior runs intact; failed processing leaves pending QC.
     """
     qc = load_latest_qc_annotations(recording, config)
@@ -194,7 +215,8 @@ def run_preprocessing(recording, config):
     if config["qc"]["open_gui"] and needs_review:
         from .preproc_gui import run_qc_gui
 
-        qc = run_qc_gui(recording, config, qc, prepared=prepared)
+        preview = preprocess_recording(recording, config, qc, prepared=prepared, provisional=True)
+        qc = run_qc_gui(recording, config, qc, prepared=prepared, preview=preview)
         if qc is None:
             logger.info("Cancelled %s; no result saved", recording.recording_id)
             return None, None, False

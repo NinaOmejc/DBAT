@@ -18,14 +18,15 @@ channels = ["ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphr
 filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm.dat"  # Primary filename with subject/measurement placeholders.
 alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_Pom{measurement}_DeTr_Norm_Glue.dat"  # Fallback filename when the primary is absent; empty disables it.
 
-# Initial manual technical quality control
+# Manual technical QC of the final preprocessed signal
 [qc]
 channels = ["Resp-Lungs", "Resp-Diaphragm", "SpO2"]  # Channels displayed and assessed in manual QC, in this order; other native channels remain stored.
 open_gui = true  # Open QC when no accepted review exists; false creates no manual review evidence.
 review_again = false  # Reopen accepted QC explicitly and bypass the preprocessing cache when open_gui is true.
 window_length = 600.0  # Initial visible window length, expressed in window_unit.
 window_unit = "seconds"  # seconds | samples; 600 samples at 200 Hz is 3 seconds.
-display_mode = "corrected_view"  # corrected_view | shared_scale | independent_scale; original modes show source orientation.
+display_mode = "preprocessed"  # original | cleaned | preprocessed; default overlays final preprocessing with the original.
+scale_mode = "shared"  # shared | independent; shared uses common belt amplitude limits in the selected view.
 artifact_scope = "both_belts"  # both_belts | selected_channel; the latter marks only the dragged subplot's channel.
 reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
@@ -53,8 +54,9 @@ polyorder = 3  # Savitzky-Golay polynomial degree; must be nonnegative and small
 
 # Optional slow-drift detrending
 [preprocessing.detrend]
-method = "none"  # none | moving_detrend; filtering is configured separately; none avoids repeating external DeTr_Norm preprocessing.
+method = "none"  # none | moving_detrend | robust_median; filtering is configured separately; none avoids repeating external DeTr_Norm preprocessing.
 window_sec = 60.0  # Moving-detrend window in seconds (MATLAB default); effective odd sample length is recorded.
+robust_median_window_sec = 11.0  # Independent moving-median baseline window in seconds; Sub100 experiment used 11 and 45.
 
 # Optional native-grid Butterworth filtering (SciPy SOS; fourth order per pass)
 [preprocessing.filtering.highpass]

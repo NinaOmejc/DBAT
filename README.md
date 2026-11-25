@@ -234,7 +234,9 @@ each result.
 When a compatible saved result cannot be reused, `check_recording()` loads QC,
 computes automatic corrections and optional polarity diagnostics once, then passes
 that cached preparation to the existing QC GUI when enabled. Accepted polarity is
-applied to a fresh corrected copy before native detrending/filtering, optional primary resampling, one processed-grid smoothing pass and versioned saving. ECG/BP are
+applied to a fresh corrected copy before native detrending/filtering, optional primary resampling and one processed-grid
+smoothing pass. The QC GUI then displays that final provisional signal. Accepted
+QC is preserved before final recomputation and saving. ECG/BP are
 unchanged by automatic cleaning. No downstream features or labels are computed.
 
 `preprocessing.artifacts` enables automatic cleaning by default. Belts use the latest
@@ -287,7 +289,7 @@ timestamps are saved separately from the manual QC evidence.
 
 - `qc.channels` defaults to `["Resp-Lungs", "Resp-Diaphragm", "SpO2"]`, in that
   display order. Change this list to review other channels. All six native channels
-  remain available on the native source grid during QC; final outputs use the processed grid. Slider, Previous/Next and zoom buttons move
+  remain available in the original source file; final outputs use the processed grid. Slider, Previous/Next and zoom buttons move
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
   200 Hz; `600` seconds is **120000 samples**. Drawing alone may be thinned.
 - The GUI opens maximized to the current monitor's available screen area on the
@@ -313,15 +315,25 @@ timestamps are saved separately from the manual QC evidence.
   (green shading); hidden channels receive no new review evidence. Navigation alone records no inspection. A usable recording-level
   rating alone does not establish locally artifact-free samples. Inspect all plots
   before confirming. Repeat through the recording for full coverage.
-- The **Display mode** radio group shows all three options, with a blue indicator
-  and bold blue label for the active mode: **Original — shared scale** (original
-  belts, common limits), **Original — independent scale** (individual limits),
-  and **Corrected + original**
-  (interpolated signals, chosen orientation, robust 1st–99th-percentile display
-  limits). `qc.display_mode` selects the initial mode; default is `corrected_view`.
-  Corrected mode overlays the original in grey and also works for SpO2. Display
-  limits never alter values. Teal hatching marks interpolation; orange marks
-  unresolved candidates, distinct from red confirmed manual artifacts.
+- **Waveform view** has three radio choices: **Original** (unchanged `.dat`),
+  **Cleaned** (automatic interpolation plus the current polarity, before detrending),
+  and **Preprocessed + Original** (default; actual final `preproc_signal` with a gray
+  original overlay). A separate **Belt scale** radio group chooses **Shared** or
+  **Independent** limits. Blue bold labels identify the active view and scale.
+  All curves use seconds, even when original and processed sampling rates differ;
+  manual interval bounds always use the original native grid.
+- **Previous/Next candidate** selects and centres each consolidated automatic warning.
+  The interval, channel, detector reason(s) and resolution are shown. Decisions are
+  enabled only while the selected candidate is visible. **Keep physiological /
+  dismiss** retains numerical values and removes its unresolved warning without
+  marking unrelated samples inspected. **Confirm artifact** creates a native manual
+  annotation and excludes it through validity masks, without new interpolation.
+  Original detections, protection reasons and interpolation evidence remain in
+  provenance; explicit decisions retain reviewer/time and preparation identity.
+  Teal hatching identifies automatically interpolated samples; orange identifies
+  unresolved candidates. Resolved candidates remain available for inspection.
+  Removing a confirmed candidate's manual artifact reopens its warning; the prior
+  decision remains in the audit history.
 - The polarity section is shown only when
   `preprocessing.check_relative_belt_polarity = true`. Hiding it preserves any
   previously accepted decision and creates no new polarity decision.
@@ -355,7 +367,11 @@ a new cached run, because that intermediate is no longer stored.
 
 `prepared["corrected"]` remains a temporary, source-oriented input for initial
 technical QC and polarity assessment; it is not saved as a fourth canonical signal.
-The GUI still runs before optional detrending and respiratory smoothing.
+The GUI opens after the complete provisional detrending/filtering/resampling/
+smoothing chain. Rating, coverage, artifact, candidate and polarity edits refresh
+its final preview and masks. On acceptance the workflow writes recoverable QC,
+then recomputes the accepted result; the writer rejects provisional previews.
+A failed preview is cleared and reported rather than silently reused.
 
 **All future respiratory analysis starts from `result.preproc_signal`.**
 `result.respiratory_signal` is a direct alias for that same array, with no copy,
@@ -392,7 +408,8 @@ values. ECG/BP and other channels without an applicable method also pass through
 
 Detrending remains **none** by default because `DeTr_Norm.dat` can already include
 external detrending/normalization. Optional `moving_detrend` retains the odd 60 s
-moving-mean trend and per-run residual-mean removal. The supplied recording is not
+moving-mean trend and per-run residual-mean removal. Independent `robust_median`
+uses the tested Sub100 baseline sequence described below. The supplied recording is not
 claimed to be untouched sensor data.
 
 ## Numerical values, processing support and QC
@@ -419,9 +436,35 @@ finite waveform across QC/artifact flags. Skips record their
 native or processed coordinate basis. Interpolation influence is retained separately;
 filtering and upsampling never create manual evidence.
 
+## Optional robust median detrending
+
+```toml
+[preprocessing.detrend]
+method = "none"  # Choose robust_median explicitly; default stays none.
+window_sec = 60.0  # Independent MATLAB moving-detrend window.
+robust_median_window_sec = 11.0  # Also supports 20, 45, etc.
+```
+
+`robust_median` reproduces the user-supplied Sub100 experiment's
+`robust_baseline_correction`: complete one-second block medians, nearest-edge
+moving median, [SciPy PCHIP](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.PchipInterpolator.html)
+at block centres, then native-grid Gaussian baseline smoothing (sigma 0.7 s,
+reflect edges, truncate 4). It subtracts the baseline and restores its global
+median offset. A trailing incomplete second is excluded from block estimation;
+the baseline is extrapolated back to every original sample. No abrupt-step
+correction or extra baseline correction in `smoothing.py` is added.
+
+Only configured belts are affected. Genuine gaps/confirmed artifacts split runs;
+excluded values are retained, and runs shorter than two complete blocks pass
+through with false support. Conservative baseline-neighbourhood masks exclude
+contamination around internal gaps/artifacts. Interpolation influence also tracks
+the run-wide restored offset. Original count/rate/time origin stay unchanged.
+Method, requested/effective windows, interpolation/Gaussian settings, support radius
+and the experiment source SHA-256 are recorded in provenance.
+
 ## Optional filtering, separate from detrending
 
-`preprocessing.detrend.method` remains `none | moving_detrend`. Filtering is an
+`preprocessing.detrend.method` is `none | moving_detrend | robust_median`. Filtering is an
 independent category; both Butterworth filters default **off**:
 
 ```toml

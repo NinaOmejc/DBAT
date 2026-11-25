@@ -299,6 +299,41 @@ def preprocess_spo2(values, fs_hz, settings):
     return corrected, interpolated, candidates, events, info
 
 
+def candidate_intervals(recording, masks, events, signature):
+    """Consolidate per-channel warning masks while retaining all detector evidence.
+
+    Each disjoint native candidate retains stable identity, reasons and original
+    events. Interpolated samples are excluded by the existing detector masks;
+    consolidation does not change correction thresholds or breath protection.
+    """
+    candidates = []
+    for column, name in enumerate(recording.channels):
+        for start, end in continuous_runs(masks["auto_candidate"][:, column]):
+            evidence = [
+                event
+                for event in events
+                if event["channel"] == name
+                and event["action"] == "review_candidate"
+                and event["start_sample"] < end
+                and event["end_sample"] > start
+            ]
+            reasons = list(dict.fromkeys(event["reason"] for event in evidence))
+            key = json.dumps([signature, name, int(start), int(end), reasons])
+            candidates.append(
+                {
+                    "id": hashlib.sha256(key.encode()).hexdigest()[:24],
+                    "channel": name,
+                    "start_sample": int(start),
+                    "end_sample": int(end),
+                    "start_sec": start / recording.fs_hz,
+                    "end_sec": end / recording.fs_hz,
+                    "reasons": reasons,
+                    "evidence": evidence,
+                }
+            )
+    return sorted(candidates, key=lambda item: (item["start_sample"], item["channel"]))
+
+
 def clean_recording(recording, config):
     """Detect/correct each supported channel once, retaining immutable native arrays.
 
@@ -395,12 +430,15 @@ def clean_recording(recording, config):
             sort_keys=True,
         ).encode()
     ).hexdigest()
+    candidates = candidate_intervals(recording, masks, events, signature)
+    provenance["candidates"] = candidates
     corrected.setflags(write=False)
     for mask in masks.values():
         mask.setflags(write=False)
     return {
         "identity": identity,
         "signature": signature,
+        "candidates": candidates,
         "corrected": corrected,
         "masks": masks,
         "provenance": provenance,

@@ -142,8 +142,10 @@ def _validate(config, directory):
     ):
         raise ValueError("qc.channels must be a nonempty list of unique input channel names")
     window_samples(qc["window_length"], qc["window_unit"], fs_hz)
-    if qc["display_mode"] not in {"shared_scale", "independent_scale", "corrected_view"}:
-        raise ValueError("qc.display_mode must be shared_scale, independent_scale or corrected_view")
+    if qc["display_mode"] not in {"original", "cleaned", "preprocessed"}:
+        raise ValueError("qc.display_mode must be original, cleaned or preprocessed")
+    if qc["scale_mode"] not in {"shared", "independent"}:
+        raise ValueError("qc.scale_mode must be shared or independent")
     if qc["artifact_scope"] not in {"both_belts", "selected_channel"}:
         raise ValueError("qc.artifact_scope must be both_belts or selected_channel")
     if qc["initial_rating"] != "unassessed":
@@ -200,12 +202,13 @@ def _validate(config, directory):
         raise ValueError(
             "Savitzky-Golay needs an odd window in samples and 0 <= polyorder < window"
         )
-    if detrend["method"] not in {"none", "moving_detrend"}:
+    if detrend["method"] not in {"none", "moving_detrend", "robust_median"}:
         raise ValueError(
-            "detrend.method must be none or moving_detrend; filters belong in preprocessing.filtering"
+            "detrend.method must be none, moving_detrend or robust_median; filters belong in preprocessing.filtering"
         )
     if window_samples(detrend["window_sec"], "seconds", fs_hz) < 3:
         raise ValueError("detrend.window_sec must resolve to at least three samples")
+    window_samples(detrend["robust_median_window_sec"], "seconds", 1.0)
     if type(resampling["filter_half_width"]) is not int or resampling["filter_half_width"] < 1:
         raise ValueError("resampling.filter_half_width must be a positive integer")
     beta = resampling["kaiser_beta"]
