@@ -327,13 +327,16 @@ timestamps are saved separately from the manual QC evidence.
   rating alone does not establish locally artifact-free samples. Inspect all plots
   before confirming. Repeat through the recording for full coverage.
 - **Waveform view** has three radio choices: **Original** (unchanged `.dat`),
-  **Cleaned** (automatic interpolation plus the current polarity, before detrending),
-  and **Preprocessed + Original** (default; actual final `preproc_signal` in strong
+  **Preprocessed** (the actual final `preproc_signal` alone),
+  and **Preprocessed + Original** (default; the identical final signal in strong
   solid blue, slightly thicker and drawn above the moderately visible dashed gray
   original). Matching legend entries identify both curves. A separate **Belt scale** radio group chooses **Shared** or
   **Independent** limits. Blue bold labels identify the active view and scale.
   All curves use seconds, even when original and processed sampling rates differ;
-  manual interval bounds always use the original native grid.
+  manual interval bounds always use the original native grid. Config values are
+  `original`, `preprocessed`, and `preprocessed_original` (default overlay).
+  The former `cleaned` setting now means `preprocessed`; the early artifact-only
+  stage is retained internally for processing-impact metrics, not as a GUI view.
 - Automatic candidates are **informational only**: teal hatching shows initial
   interpolation, orange shading shows early candidates, and purple shading shows
   residual-noise candidates. There are no candidate-selection, confirmation or

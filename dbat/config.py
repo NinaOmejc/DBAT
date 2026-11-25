@@ -141,8 +141,10 @@ def _validate(config, directory):
     ):
         raise ValueError("qc.channels must be a nonempty list of unique input channel names")
     window_samples(qc["window_length"], qc["window_unit"], fs_hz)
-    if qc["display_mode"] not in {"original", "cleaned", "preprocessed"}:
-        raise ValueError("qc.display_mode must be original, cleaned or preprocessed")
+    if qc["display_mode"] == "cleaned":
+        qc["display_mode"] = "preprocessed"
+    if qc["display_mode"] not in {"original", "preprocessed", "preprocessed_original"}:
+        raise ValueError("qc.display_mode must be original, preprocessed or preprocessed_original")
     if qc["scale_mode"] not in {"shared", "independent"}:
         raise ValueError("qc.scale_mode must be shared or independent")
     if qc["artifact_scope"] not in {"both_belts", "selected_channel"}:

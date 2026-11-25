@@ -25,8 +25,8 @@ from .cleaning import prepare_recording
 from .pipeline import preprocess_recording, numerical_input_signature, refresh_qc_masks
 from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
 
-DISPLAY_MODES = ("original", "cleaned", "preprocessed")
-DISPLAY_LABELS = ("Original", "Cleaned", "Preprocessed + Original")
+DISPLAY_MODES = ("original", "preprocessed", "preprocessed_original")
+DISPLAY_LABELS = ("Original", "Preprocessed", "Preprocessed + Original")
 
 
 def _plot_indices(values, limit, full_detail=False):
@@ -113,6 +113,8 @@ class ManualQCEditor:
             ),
         )
         self.display_mode = self.settings["display_mode"]
+        if self.display_mode == "cleaned":
+            self.display_mode = "preprocessed"
         self.scale_mode = self.settings["scale_mode"]
         self.shading = []
         self._patch_pool = {}
@@ -629,27 +631,25 @@ class ManualQCEditor:
         if window_key != self._plot_window:
             self._plot_cache.clear()
             self._plot_window = window_key
-        if self.display_mode == "preprocessed" and self.preview is not None:
+        processed_view = self.display_mode != "original"
+        overlay_original = self.display_mode == "preprocessed_original"
+        if processed_view and self.preview is not None:
             times, displayed = (
                 self.preview.processed_time_sec,
                 self.preview.preproc_signal,
             )
             first, last = np.searchsorted(times, [lower, upper])
-        elif self.display_mode == "preprocessed":
+        elif processed_view:
             times, displayed = self.recording.time_sec, self.corrected
             first = last = 0
         else:
             times = self.recording.time_sec
-            displayed = (
-                self.corrected
-                if self.display_mode == "cleaned"
-                else self.recording.samples
-            )
+            displayed = self.recording.samples
             first, last = self.start, end
         limits = {}
         for name, column in zip(self.channels, self.columns, strict=True):
             _, values = self._visible_samples(displayed, times, column, first, last)
-            if self.display_mode == "preprocessed":
+            if overlay_original:
                 _, original = self._visible_samples(
                     self.recording.samples,
                     self.recording.time_sec,
@@ -680,7 +680,7 @@ class ManualQCEditor:
             strict=True,
         ):
             line.set_data(*self._visible_samples(displayed, times, column, first, last))
-            if self.display_mode == "preprocessed":
+            if overlay_original:
                 original.set_data(
                     *self._visible_samples(
                         self.recording.samples,
@@ -770,13 +770,13 @@ class ManualQCEditor:
         self.lines[0].set_label(
             {
                 "original": "Original",
-                "cleaned": "Cleaned",
                 "preprocessed": "Preprocessed",
+                "preprocessed_original": "Preprocessed",
             }[self.display_mode]
         )
         waveform_handles = (
             [self.original_lines[0], self.lines[0]]
-            if self.display_mode == "preprocessed"
+            if overlay_original
             else [self.lines[0]]
         )
         if self._legend_mode != self.display_mode:
