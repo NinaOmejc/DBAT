@@ -4,7 +4,7 @@ Run directly in PyCharm for synthetic checks, or use:
     python scripts/check_peak_detection.py
     python scripts/check_peak_detection.py --h5 outputs/preproc_data/Sub105_M1/run0/Sub105_M1_preprocessing.h5
 
-Reads the final preproc_signal (or legacy signals/smoothed) on processed_fs_hz; never rewrites source files, smooths
+Reads the final preproc_signal on processed_fs_hz; never rewrites source files, smooths
 again, accepts manual QC or recalculates features/labels. A failed check raises.
 """
 
@@ -203,27 +203,27 @@ def check_preprocessed_adapter():
     }
     processing = {"algorithm_version": "synthetic_preprocessing", "smoothing": {"passes": 1}}
     data = {
-        "respiratory_analysis_source": "signals/smoothed",
+        "respiratory_analysis_source": "preproc_signal",
         "processed_fs_hz": fs,
         "processed_time_sec": time,
         "channels": list(BELTS),
         "masks": masks,
-        "signals": {"smoothed": values, "original": np.zeros((12000, 2))},
+        "preproc_signal": values,
         "original_fs_hz": 200.0,
         "metadata": {"identity": identity, "qc": qc, "processing": processing},
     }
     automatic = detect_preprocessed(data)
-    assert automatic["fs_hz"] == 100.0 and automatic["source"] == "signals/smoothed"
+    assert automatic["fs_hz"] == 100.0 and automatic["source"] == "preproc_signal"
     assert automatic["belts"][BELTS[0]]["rr_mean_bpm"] == 15.0
     np.testing.assert_array_equal(automatic["belts"][BELTS[0]]["detection_waveform"], waveform)
     memory = SimpleNamespace(
-        respiratory_signal=values,
+        preproc_signal=values,
         processed_fs_hz=fs,
         processed_time_sec=time,
         masks=masks,
         qc=qc,
         provenance=processing,
-        recording=SimpleNamespace(samples=data["signals"]["original"], **identity),
+        recording=SimpleNamespace(samples=np.zeros_like(values), **identity),
     )
     from_memory = detect_preprocessed(memory)
     assert from_memory["identity"] == automatic["identity"]
@@ -232,7 +232,7 @@ def check_preprocessed_adapter():
     )
     one = deepcopy(data)
     one["channels"] = [BELTS[0]]
-    one["signals"]["smoothed"] = values[:, :1]
+    one["preproc_signal"] = values[:, :1]
     one["masks"] = {name: mask[:, :1] for name, mask in masks.items()}
     assert list(detect_preprocessed(one)["belts"]) == [BELTS[0]]
     invalid = deepcopy(data)

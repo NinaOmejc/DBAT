@@ -108,16 +108,17 @@ def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
     -------
     tuple
         Numerical values, support, interpolation influence, filter provenance,
-        and skipped detrend runs. Detrending splits at gaps/artifacts; filtering
-        follows each finite waveform across QC flags. Ratings do not split either.
+        skipped detrend runs, and the unsaved detrended vector. Detrending splits
+        at gaps/artifacts; filtering follows each finite waveform across QC flags. Ratings do not split either.
     """
     output, allowed, support, influence, skips = detrend_belt(
         values, artifact, interpolated, detrend
     )
+    detrended = output
     output, filter_support, influence, filter_details = filter_belt(
         output, allowed, influence, fs_hz, filtering
     )
-    return output, support & filter_support, influence, filter_details, skips
+    return output, support & filter_support, influence, filter_details, skips, detrended
 
 
 def detrend_and_filter_recording(corrected, recording, settings, masks):
@@ -147,6 +148,7 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
         for name, options in settings["filtering"].items()
     }
     preprocessed = corrected.copy()
+    detrended = corrected.copy()
     masks["preprocessed_support"] = masks["finite"] & ~masks["artifact"]
     masks["preprocessed_interpolated"] = masks["interpolated"].copy()
     processors, filter_details, processing_skips = {}, {}, {}
@@ -158,6 +160,7 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
                 masks["preprocessed_interpolated"][:, column],
                 filter_details[name],
                 skips,
+                detrended[:, column],
             ) = preprocess_belt(
                 corrected[:, column],
                 masks["artifact"][:, column],
@@ -186,4 +189,4 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
         "detrend": detrend_parameters,
         "filtering": filter_details,
         "processing_skips": processing_skips,
-    }
+    }, detrended

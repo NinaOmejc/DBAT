@@ -133,6 +133,6 @@ def resample_preprocessed(values, masks, native_fs, settings):
         numerical_policy="Use actual finite values regardless of QC; retain unsupported numerical outputs",
         missing_policy="Temporary linear fill for FIR only; target samples bordering genuine gaps remain missing",
         support_policy="Full FIR footprint excludes padding, artifacts, missing data and unsupported processing",
-        respiratory_analysis_source="signals/smoothed",
+        respiratory_analysis_source="preproc_signal",
     )
     return resampled, masks, effective_fs, np.arange(output_count) / effective_fs, provenance

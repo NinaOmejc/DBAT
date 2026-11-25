@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import numpy as np
 
-QC_SCHEMA = "dbat_qc_v1"
+QC_SCHEMA = "dbat_qc_v2"
 RATINGS = ("unassessed", "usable", "weak", "unavailable")
 
 
@@ -162,6 +162,9 @@ def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
             or not resolution.get("candidate_id")
             or len(resolution.get("preparation_signature", "")) != 64
             or not resolution.get("reasons")
+            or resolution.get("source_stage") not in {"early_cleaning", "signal_quality"}
+            or not isinstance(resolution.get("candidate"), dict)
+            or resolution["candidate"].get("id") != resolution.get("candidate_id")
         ):
             raise ValueError(
                 "Candidate resolution needs a decision and original detection provenance"
@@ -255,15 +258,19 @@ def annotation_masks(qc, recording, *, allow_unaccepted=False):
     return masks
 
 
-def active_candidate_resolutions(qc, prepared):
+def active_candidate_resolutions(qc, prepared, candidates=None):
     """Return decisions matching exact current candidate identity and native bounds."""
-    candidates = {item["id"]: item for item in prepared["candidates"]}
+    candidates = {
+        item["id"]: item
+        for item in (prepared["candidates"] if candidates is None else candidates)
+    }
     active = {}
     for decision in qc.get("candidate_resolutions", []):
         candidate = candidates.get(decision["candidate_id"])
         if (
             candidate is not None
-            and decision["preparation_signature"] == prepared["signature"]
+            and decision["preparation_signature"] == candidate["preparation_signature"]
+            and decision["source_stage"] == candidate["source_stage"]
             and decision["channels"] == [candidate["channel"]]
             and decision["start_sample"] == candidate["start_sample"]
             and decision["end_sample"] == candidate["end_sample"]
@@ -279,12 +286,35 @@ def active_candidate_resolutions(qc, prepared):
     return active
 
 
-def unresolved_candidate_mask(qc, prepared):
-    """Hide resolved warnings without altering automatic evidence or review coverage."""
-    unresolved = prepared["masks"]["auto_candidate"].copy()
-    for decision in active_candidate_resolutions(qc, prepared).values():
-        column = prepared["identity"]["channels"].index(decision["channels"][0])
-        unresolved[decision["start_sample"] : decision["end_sample"], column] = False
+def review_candidates(qc, prepared, quality):
+    """Combine current stage warnings and retained reviewer evidence snapshots."""
+    candidates = {
+        item["id"]: item for item in prepared["candidates"] + quality["candidates"]
+    }
+    signatures = {
+        "early_cleaning": prepared["signature"],
+        "signal_quality": quality.get("signature"),
+    }
+    for resolution in qc["candidate_resolutions"]:
+        candidate = resolution["candidate"]
+        if candidate["preparation_signature"] == signatures[candidate["source_stage"]]:
+            candidates.setdefault(candidate["id"], candidate)
+    return sorted(candidates.values(), key=lambda item: (item["start_sample"], item["channel"], item["source_stage"]))
+
+
+def unresolved_candidate_mask(
+    qc, prepared, candidates=None, *, source_stage="early_cleaning"
+):
+    """Build native unresolved warnings without changing evidence or review coverage."""
+    candidates = prepared["candidates"] if candidates is None else candidates
+    active = active_candidate_resolutions(qc, prepared, candidates)
+    unresolved = np.zeros(prepared["corrected"].shape, dtype=bool)
+    for candidate in candidates:
+        if candidate["source_stage"] == source_stage and candidate["id"] not in active:
+            column = prepared["identity"]["channels"].index(candidate["channel"])
+            unresolved[candidate["start_sample"] : candidate["end_sample"], column] = (
+                True
+            )
     return unresolved
 
 

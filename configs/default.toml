@@ -22,7 +22,7 @@ alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_P
 [qc]
 channels = ["Resp-Lungs", "Resp-Diaphragm", "SpO2"]  # Channels displayed and assessed in manual QC, in this order; other native channels remain stored.
 open_gui = true  # Open QC when no accepted review exists; false creates no manual review evidence.
-review_again = false  # Reopen accepted QC explicitly and bypass the preprocessing cache when open_gui is true.
+review_again = false  # Reopen accepted QC explicitly when open_gui is true; numerical processing always runs.
 window_length = 600.0  # Initial visible window length, expressed in window_unit.
 window_unit = "seconds"  # seconds | samples; 600 samples at 200 Hz is 3 seconds.
 display_mode = "preprocessed"  # original | cleaned | preprocessed; default overlays final preprocessing with the original.
@@ -32,14 +32,13 @@ reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
 max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing always uses native samples.
 
-# Automatically reuse the latest compatible accepted QC from run folders (including recoverable pending runs); legacy qc/ is still read.
+# Automatically reuse the latest compatible accepted QC from run folders (including recoverable pending runs).
 # Leave this table empty for automatic discovery; add paths only to override individual recordings.
 [qc.annotation_files]
 # Sub1_M1 = "../outputs/preproc_data/Sub1_M1/run0/qc.json"  # Optional accepted QC or summary.json override; path relative to this TOML.
 
 # Preprocessed signal: automatic correction, accepted polarity, optional detrending and filtering
 [preprocessing]
-reuse_preproc = true  # Reuse the latest completed compatible run; false always saves a new run.
 enabled = true  # Enable configured belt conditioning independently of review status; QC still controls analysis validity.
 channels = ["Resp-Lungs", "Resp-Diaphragm"]  # Belts selected for detrending/filtering/smoothing; SpO2 is only artifact-corrected; ECG/BP are pass-through TODOs.
 check_relative_belt_polarity = false  # Optional MATLAB-style relative assessment before QC; never flips either belt automatically.
@@ -77,6 +76,7 @@ kaiser_beta = 5.0  # Kaiser window parameter for the anti-alias FIR; SciPy's def
 
 # Technical artifact handling
 [preprocessing.artifacts]
+paired_breath_protection = false  # Optional paired-peak interpolation safeguard; synchronization is not physiological evidence.
 automatic_detection = true  # Detect/correct obvious belt and SpO2 glitches before manual QC; automatic candidates are advisory.
 belt_max_interpolation_sec = 0.25  # Maximum reconstructed belt interval in seconds; longer candidates remain unchanged.
 spo2_units = "percent"  # Explicit input-unit declaration: percent | unknown; percentage-range checks must also pass before correction.
@@ -84,9 +84,20 @@ spo2_change_threshold_pp = 8.0  # Minimum abrupt SpO2 change in percentage point
 spo2_return_tolerance_pp = 2.0  # Maximum difference from the pre-artifact SpO2 level, in percentage points.
 spo2_max_interpolation_sec = 30.0  # Maximum complete interpolated SpO2 interval in seconds, including edge padding.
 
+# Review-only residual signal quality (separate from early correction and MAE impact)
+[preprocessing.signal_quality]
+enabled = true  # Calculate metrics after final preprocessing; never modify signal or validity masks.
+window_sec = 30.0  # Complete native-time analysis window in seconds.
+step_sec = 10.0  # Window step in seconds.
+flag_candidates = true  # Show conservative residual warnings in the existing QC GUI; no automatic exclusion.
+respiratory_band_hz = [0.05, 1.0]  # Operational respiratory energy band in Hz; no clinical breath classification.
+noise_band_hz = [2.0, 20.0]  # Native HF noise band in Hz; final upper edge is capped at processed Nyquist.
+welch_segment_sec = 8.0  # Median Welch PSD, periodic Hann, 50% overlap; native frequency resolution is about 0.125 Hz.
+min_finite_fraction = 0.9  # Required contiguous finite window coverage; insufficient metrics are null, never filled.
+
 # Versioned output files and inspection preview
 [output]
-schema_version = "dbat_preprocessing_v4"  # One final root preproc_signal dataset; readers also accept earlier schemas.
+schema_version = "dbat_preprocessing_v5"  # Current-only final signal, QC, numerical quality and impact metrics.
 overwrite = false  # Existing outputs are preserved through immutable versioned runs; must remain false.
 filename = "{recording_id}_preprocessing.h5"  # HDF5 filename; recording_id expands to SubN_MN.
 save_preview = true  # Save a final preproc_signal inspection PNG for each recording.

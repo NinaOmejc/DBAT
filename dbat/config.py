@@ -11,8 +11,7 @@ from .logging import configure_logging
 
 CHANNELS = ("ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm")
 BELTS = ("Resp-Lungs", "Resp-Diaphragm")
-RESULT_SCHEMA = "dbat_preprocessing_v4"
-READABLE_RESULT_SCHEMAS = {f"dbat_preprocessing_v{version}" for version in range(1, 5)}
+RESULT_SCHEMA = "dbat_preprocessing_v5"
 
 
 def window_samples(value, unit, fs_hz):
@@ -170,11 +169,13 @@ def _validate(config, directory):
         raise ValueError("qc.max_plot_points must be an integer >= 100")
     for value, name in [
         (qc["open_gui"], "qc.open_gui"),
-        (qc.get("review_again", False), "qc.review_again"),
+        (qc["review_again"], "qc.review_again"),
         (preprocessing["check_relative_belt_polarity"], "preprocessing.check_relative_belt_polarity"),
         (preprocessing["artifacts"]["automatic_detection"], "preprocessing.artifacts.automatic_detection"),
+        (preprocessing["artifacts"]["paired_breath_protection"], "preprocessing.artifacts.paired_breath_protection"),
+        (preprocessing["signal_quality"]["enabled"], "preprocessing.signal_quality.enabled"),
+        (preprocessing["signal_quality"]["flag_candidates"], "preprocessing.signal_quality.flag_candidates"),
         (preprocessing["enabled"], "preprocessing.enabled"),
-        (preprocessing.setdefault("reuse_preproc", True), "preprocessing.reuse_preproc"),
         (output["save_preview"], "output.save_preview"),
     ]:
         if type(value) is not bool:
@@ -226,6 +227,22 @@ def _validate(config, directory):
         if (isinstance(padding, bool) or not isinstance(padding, (int, float))
                 or not math.isfinite(padding) or padding <= 0):
             raise ValueError(f"filtering.{name}.edge_pad_sec must be positive and finite")
+    quality = preprocessing["signal_quality"]
+    for name in ("window_sec", "step_sec", "welch_segment_sec"):
+        window_samples(quality[name], "seconds", fs_hz)
+    if not 2 * quality["welch_segment_sec"] <= quality["window_sec"] or not quality["step_sec"] <= quality["window_sec"]:
+        raise ValueError("signal_quality needs window_sec >= 2*welch_segment_sec and step_sec <= window_sec")
+    for name in ("respiratory_band_hz", "noise_band_hz"):
+        band = quality[name]
+        if (not isinstance(band, list) or len(band) != 2
+                or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in band)
+                or not 0 < band[0] < band[1] < fs_hz / 2):
+            raise ValueError(f"signal_quality.{name} must be two increasing frequencies below native Nyquist")
+    if quality["respiratory_band_hz"][1] >= quality["noise_band_hz"][0]:
+        raise ValueError("signal_quality respiratory and noise bands must not overlap")
+    fraction = quality["min_finite_fraction"]
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not math.isfinite(fraction) or not 0 < fraction <= 1:
+        raise ValueError("signal_quality.min_finite_fraction must be in (0, 1]")
     artifacts = preprocessing["artifacts"]
     if artifacts["spo2_units"] not in {"percent", "unknown"}:
         raise ValueError("artifacts.spo2_units must be percent or unknown")
@@ -238,7 +255,7 @@ def _validate(config, directory):
     if artifacts["belt_max_interpolation_sec"] > 0.25:
         raise ValueError("Belt interpolation is restricted to at most 0.25 seconds")
     if output["schema_version"] != RESULT_SCHEMA or output["overwrite"] is not False:
-        raise ValueError("Use dbat_preprocessing_v4 and output.overwrite=false (versioned saves)")
+        raise ValueError("Use dbat_preprocessing_v5 and output.overwrite=false (versioned saves)")
     try:
         filename = output["filename"].format(recording_id="Sub1_M1")
     except (KeyError, ValueError) as error:

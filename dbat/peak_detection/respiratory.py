@@ -500,7 +500,7 @@ def detect_preprocessed(data, settings=None):
     ----------
     data : PreprocessedRecording or dict
         Existing in-memory result, or load_preprocessing_result output. Uses
-        only preproc_signal (or legacy signals/smoothed), processed_fs_hz and QC masks.
+        only preproc_signal, processed_fs_hz and processed-grid QC masks.
     settings : DetectorSettings, optional
         Respiratory detector settings; no preprocessing operation is performed.
 
@@ -512,19 +512,16 @@ def detect_preprocessed(data, settings=None):
     """
     if isinstance(data, dict):
         source = data["respiratory_analysis_source"]
-        if source == "preproc_signal":
-            values = data["preproc_signal"]
-        elif source == "signals/smoothed":
-            values = data["signals"]["smoothed"]
-        else:
-            raise ValueError("Respiratory detection requires the final preprocessed signal")
+        if source != "preproc_signal":
+            raise ValueError("Respiratory detection requires preproc_signal")
+        values = data["preproc_signal"]
         fs = data["processed_fs_hz"]
         time, channels, masks = data["processed_time_sec"], data["channels"], data["masks"]
         metadata = data["metadata"]
         identity, provenance, qc = metadata["identity"], metadata["processing"], metadata["qc"]
     else:
-        source = data.provenance.get("respiratory_analysis_source", "signals/smoothed")
-        values, fs = data.respiratory_signal, data.processed_fs_hz
+        source = "preproc_signal"
+        values, fs = data.preproc_signal, data.processed_fs_hz
         time, channels, masks = data.processed_time_sec, data.recording.channels, data.masks
         identity = recording_identity(data.recording)
         provenance, qc = data.provenance, data.qc

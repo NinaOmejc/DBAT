@@ -45,20 +45,17 @@ from dbat.preprocessing.annotations import (
 )
 from dbat.preprocessing.cleaning import (
     clean_recording,
+    prepare_recording,
+    preprocess_bp,
+    preprocess_ecg,
     odd_samples,
     paired_breath_candidates,
     preprocess_belt_artifacts,
     preprocess_spo2,
     robust_scale,
 )
-from dbat.preprocessing.filtering import filter_belt
-from dbat.preprocessing.pipeline import (
-    prepare_recording,
-    preprocess_belt,
-    preprocess_bp,
-    preprocess_ecg,
-    preprocess_recording,
-)
+from dbat.preprocessing.filtering import filter_belt, preprocess_belt
+from dbat.preprocessing.pipeline import preprocess_recording
 from dbat.preprocessing.polarity import (
     POLARITY_LABELS,
     apply_polarity,
@@ -149,7 +146,7 @@ def check_cleaning(recording, config, prepared):
     negative = x.copy()
     negative[12000:12400] -= 20
     result = preprocess_belt_artifacts(negative, fs, np.array([], int), 0.25)
-    assert result[2][12000:12400].any()
+    assert all(event["reason"] != "sustained_negative_displacement" for event in result[3])
     flat = np.full(len(x), 97.0)
     drop = flat.copy()
     drop[6000:6400] = 65
@@ -299,10 +296,10 @@ def check_pipeline_storage(recording, config, prepared):
     qc = _accepted_qc(recording)
     automatic = preprocess_recording(recording, config, prepared=prepared)
     reviewed = preprocess_recording(recording, config, qc, prepared=prepared)
-    np.testing.assert_array_equal(automatic.smoothed, reviewed.smoothed)
+    np.testing.assert_array_equal(automatic.preproc_signal, reviewed.preproc_signal)
     assert not automatic.masks["valid"].any() and reviewed.masks["valid"].any()
     assert (
-        reviewed.original is recording.samples and reviewed.respiratory_signal is reviewed.smoothed
+        reviewed.original is recording.samples
     )
     reviewed.require_native_grid()
     for method in ("none", "savitzky_golay"):
@@ -316,15 +313,15 @@ def check_pipeline_storage(recording, config, prepared):
                 if method == "none"
                 else savgol_filter(result.preprocessed[:, j], 51, 3, mode="interp")
             )
-            np.testing.assert_array_equal(result.smoothed[:, j], expected)
+            np.testing.assert_array_equal(result.preproc_signal[:, j], expected)
     for rate in (100.0, 300.0):
         variant = deepcopy(config)
         variant["preprocessing"]["resampling"]["resample_freq"] = rate
         result = preprocess_recording(recording, variant, qc, prepared=prepared)
-        assert result.processed_fs_hz == rate and len(result.smoothed) == round(
+        assert result.processed_fs_hz == rate and len(result.preproc_signal) == round(
             len(recording.samples) * rate / recording.fs_hz
         )
-        assert np.isfinite(result.smoothed).all() and result.masks["boundary"].any()
+        assert np.isfinite(result.preproc_signal).all() and result.masks["boundary"].any()
         with np.testing.assert_raises(ValueError):
             result.require_native_grid()
     for rate in (0.0, recording.fs_hz):
@@ -364,7 +361,7 @@ def check_pipeline_storage(recording, config, prepared):
     disabled = deepcopy(config)
     disabled["preprocessing"]["enabled"] = False
     bypass = preprocess_recording(recording, disabled, qc, prepared=prepared)
-    np.testing.assert_array_equal(bypass.smoothed, prepared["corrected"])
+    np.testing.assert_array_equal(bypass.preproc_signal, prepared["corrected"])
 
 
 def check_gui_callbacks(recording, config, prepared):
@@ -502,8 +499,14 @@ def verify_saved_result(path, result):
             or handle["channels"].asstr()[:].tolist() != list(recording.channels)
         ):
             raise ValueError("Sampling rates or channel order changed during saving")
-        if "preproc_signal" not in handle or "signals" in handle or "resampled" in handle:
-            raise ValueError("Expected only the final root preproc_signal signal dataset")
+        if (
+            "preproc_signal" not in handle
+            or "signals" in handle
+            or "resampled" in handle
+        ):
+            raise ValueError(
+                "Expected only the final root preproc_signal signal dataset"
+            )
         for name, expected in expected_arrays.items():
             saved = handle[name][:]
             if (
@@ -523,57 +526,93 @@ def verify_saved_result(path, result):
         if metadata["qc"] != result.qc:
             raise ValueError("Saved QC annotations differ from the accepted input")
         validate_qc_annotations(metadata["qc"], recording)
+        if (
+            metadata["signal_quality"] != result.signal_quality
+            or metadata["processing"]["preprocessing_impact"]
+            != result.provenance["preprocessing_impact"]
+        ):
+            raise ValueError(
+                "Saved quality or impact metrics differ from the computed result"
+            )
+        if "preprocessing_impact" in json.dumps(metadata["qc"]):
+            raise ValueError(
+                "Preprocessing impact must not be stored in QC annotations"
+            )
     if not np.array_equal(result.original, recording.samples, equal_nan=True):
         raise ValueError("Original samples changed")
     n_samples = len(result.preproc_signal)
-    if result.smoothed.shape != (n_samples, len(recording.channels)):
+    if result.preproc_signal.shape != (n_samples, len(recording.channels)):
         raise ValueError("Primary processed signal shapes disagree")
     for times, fs_hz, count in (
         (result.original_time_sec, result.original_fs_hz, len(result.original)),
         (result.processed_time_sec, result.processed_fs_hz, n_samples),
     ):
         if not np.array_equal(times, np.arange(count) / fs_hz):
-            raise ValueError("Signal time grid disagrees with its zero origin and sampling rate")
+            raise ValueError(
+                "Signal time grid disagrees with its zero origin and sampling rate"
+            )
     rate = result.provenance["resampling"]
     if rate["applied"]:
-        expected_count = (len(result.original) * rate["up"] + rate["down"] - 1) // rate["down"]
+        expected_count = (len(result.original) * rate["up"] + rate["down"] - 1) // rate[
+            "down"
+        ]
         if n_samples != expected_count:
-            raise ValueError("Primary processed sample count disagrees with the resampling ratio")
+            raise ValueError(
+                "Primary processed sample count disagrees with the resampling ratio"
+            )
         numerator = np.arange(n_samples) * rate["down"]
         left = np.minimum(numerator // rate["up"], len(result.original) - 1)
-        right = np.minimum((numerator + rate["up"] - 1) // rate["up"], len(result.original) - 1)
-        available = np.isfinite(result.original[left]) & np.isfinite(result.original[right])
+        right = np.minimum(
+            (numerator + rate["up"] - 1) // rate["up"], len(result.original) - 1
+        )
+        available = np.isfinite(result.original[left]) & np.isfinite(
+            result.original[right]
+        )
     else:
         result.require_native_grid()
         available = np.isfinite(result.original)
     for values in (result.preproc_signal,):
-        if np.any(available & ~np.isfinite(values)) or np.any(~available & np.isfinite(values)):
-            raise ValueError("Numerical availability disagrees with genuine source support")
+        if np.any(available & ~np.isfinite(values)) or np.any(
+            ~available & np.isfinite(values)
+        ):
+            raise ValueError(
+                "Numerical availability disagrees with genuine source support"
+            )
     for name, mask in result.masks.items():
-        if mask.dtype != bool or mask.shape != result.smoothed.shape:
-            raise ValueError(f"Mask is not Boolean on the primary processed grid: {name}")
+        if mask.dtype != bool or mask.shape != result.preproc_signal.shape:
+            raise ValueError(
+                f"Mask is not Boolean on the primary processed grid: {name}"
+            )
     if np.any(
         result.masks["valid"]
-        & (~result.masks["reviewed"] | result.masks["artifact"] | ~result.masks["smoothed_support"])
+        & (
+            ~result.masks["reviewed"]
+            | result.masks["artifact"]
+            | ~result.masks["smoothed_support"]
+        )
     ):
-        raise ValueError("Processing accepted unreviewed, artifact or unsupported samples")
+        raise ValueError(
+            "Processing accepted unreviewed, artifact or unsupported samples"
+        )
     if rate["applied"] and np.any(
-        result.masks["valid"] & (result.masks["boundary"] | result.masks["missing_influence"])
+        result.masks["valid"]
+        & (result.masks["boundary"] | result.masks["missing_influence"])
     ):
         raise ValueError("Processing accepted contaminated FIR support")
-    if (
-        result.respiratory_signal is not result.smoothed
-        or result.provenance["respiratory_analysis_fs_hz"] != result.processed_fs_hz
-    ):
-        raise ValueError("Respiratory analysis must use smoothed and its processed sampling rate")
+    if result.provenance["respiratory_analysis_fs_hz"] != result.processed_fs_hz:
+        raise ValueError(
+            "Respiratory analysis must use preproc_signal and its processed sampling rate"
+        )
     for column, name in enumerate(recording.channels):
-        if result.preprocessed is not None and (
+        if (
             name not in BELTS
             or name not in result.provenance["selected_channels"]
             or result.provenance["smoothing"]["method"] == "none"
         ):
             if not np.array_equal(
-                result.smoothed[:, column], result.preprocessed[:, column], equal_nan=True
+                result.preproc_signal[:, column],
+                result.preprocessed[:, column],
+                equal_nan=True,
             ):
                 raise ValueError(
                     "A channel without respiratory smoothing differs from preprocessed"
@@ -585,7 +624,7 @@ def verify_saved_result(path, result):
             {
                 "status": "passed",
                 "checked_at_utc": utc_now(),
-                "schema_version": "dbat_manual_check_v4",
+                "schema_version": "dbat_manual_check_v5",
                 "recording_id": recording.recording_id,
                 "source_sha256": recording.source_sha256,
                 "checks": [
@@ -594,7 +633,8 @@ def verify_saved_result(path, result):
                     "explicit original and processed sampling rates/time axes",
                     "processed-grid Boolean masks",
                     "numerical availability independent of QC/support masks",
-                    "smoothed respiratory source and processed rate",
+                    "final respiratory source and processed rate",
+                    "quality/impact metadata round trip; impact excluded from QC",
                     "QC identity/bounds/provenance",
                     "exact HDF5/summary/qc.json round trip",
                 ],
@@ -607,7 +647,7 @@ def verify_saved_result(path, result):
         recording.recording_id,
         result.original.shape,
         result.original_fs_hz,
-        result.smoothed.shape,
+        result.preproc_signal.shape,
         result.processed_fs_hz,
     )
     logger.debug("Validation: %s", path.parent / "validation.json")
@@ -615,7 +655,7 @@ def verify_saved_result(path, result):
 
 
 def check_recording(config, subject, measurement):
-    """Reuse compatible output or review, condition and verify one new recording.
+    """Review if needed, condition and verify one new immutable recording run.
 
     Cancel returns None and leaves existing results and accepted QC untouched.
     All processing goes through the same DBAT package functions as a single run.
@@ -623,8 +663,8 @@ def check_recording(config, subject, measurement):
     recording = load_dat_recording(
         config, config["input"]["dat_file"] or None, subject=subject, measurement=measurement
     )
-    result, path, reused = run_preprocessing(recording, config)
-    if path is not None and not reused:
+    result, path = run_preprocessing(recording, config)
+    if path is not None:
         verify_saved_result(path, result)
     return path
 

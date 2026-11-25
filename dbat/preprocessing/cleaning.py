@@ -20,7 +20,7 @@ from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
-ALGORITHM_VERSION = "dbat_auto_cleaning_v1"
+ALGORITHM_VERSION = "dbat_auto_cleaning_v2"
 
 
 def robust_scale(values):
@@ -51,7 +51,7 @@ def _estimation_signal(values):
 
 
 def paired_breath_candidates(belts, fs_hz):
-    """Protect broad positive paired peaks, using the supplied belt experiment.
+    """Locate paired peaks for an optional interpolation safeguard, not physiology.
 
     Parameters
     ----------
@@ -109,8 +109,9 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
     """Interpolate only brief residual spikes with finite, compatible flanks.
 
     Returns corrected values, interpolation/candidate masks, events and detector
-    parameters. Paired broad breaths and sustained negative displacements are
-    preserved. Detection is adapted from the latest supplied test_cleaning.py;
+    parameters. Optional paired peaks remain protected. Baseline-displacement
+    detection is absent; detrending owns baseline correction. Detection is adapted
+    from the latest supplied test_cleaning.py;
     the fixed 50-sample flank lag is replaced with 0.25 * fs_hz.
     """
     corrected = values.copy()
@@ -140,7 +141,7 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
             (paired_times > start - round(fs_hz)) & (paired_times < end + round(fs_hz))
         )
         if near_pair:
-            reason = "preserved_possible_paired_breath"
+            reason = "paired_peak_protection"
         elif (end - start) / fs_hz > maximum_sec:
             reason = "too_long_to_reconstruct"
         elif start == 0 or end >= len(values) or not finite[start - 1 : end + 1].all():
@@ -156,25 +157,11 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
             continue
         candidates[start:end] = True
         events.append(_event(start, end, fs_hz, "review_candidate", reason))
-    deviations = gaussian_filter1d(safe, sigma=0.07 * fs_hz) - _baseline(safe, fs_hz, 15)
-    negative_limit = max(
-        6 * robust_scale(deviations), 3 * np.percentile(np.maximum(-deviations, 0), 95), 1e-10
-    )
-    for start, end in continuous_runs(deviations < -negative_limit):
-        if (end - start) / fs_hz < 0.30:
-            continue
-        padding = round(0.15 * fs_hz)
-        start, end = max(0, start - padding), min(len(values), end + padding)
-        candidates[start:end] = True
-        events.append(
-            _event(start, end, fs_hz, "review_candidate", "sustained_negative_displacement")
-        )
     candidates &= finite & ~interpolated
     info = {
         "status": "assessed",
         "residual_threshold": float(threshold),
         "flank_limit": float(flank_limit),
-        "negative_limit": float(negative_limit),
     }
     return corrected, interpolated, candidates, events, info
 
@@ -299,7 +286,7 @@ def preprocess_spo2(values, fs_hz, settings):
     return corrected, interpolated, candidates, events, info
 
 
-def candidate_intervals(recording, masks, events, signature):
+def candidate_intervals(recording, masks, events, signature, *, source_stage):
     """Consolidate per-channel warning masks while retaining all detector evidence.
 
     Each disjoint native candidate retains stable identity, reasons and original
@@ -318,11 +305,13 @@ def candidate_intervals(recording, masks, events, signature):
                 and event["end_sample"] > start
             ]
             reasons = list(dict.fromkeys(event["reason"] for event in evidence))
-            key = json.dumps([signature, name, int(start), int(end), reasons])
+            key = json.dumps([signature, source_stage, name, int(start), int(end)])
             candidates.append(
                 {
                     "id": hashlib.sha256(key.encode()).hexdigest()[:24],
                     "channel": name,
+                    "source_stage": source_stage,
+                    "preparation_signature": signature,
                     "start_sample": int(start),
                     "end_sample": int(end),
                     "start_sec": start / recording.fs_hz,
@@ -350,7 +339,7 @@ def clean_recording(recording, config):
     belts = {name: recording.samples[:, recording.channels.index(name)] for name in BELTS}
     paired = (
         paired_breath_candidates(belts, recording.fs_hz)
-        if settings["automatic_detection"]
+        if settings["automatic_detection"] and settings["paired_breath_protection"]
         else np.array([], dtype=int)
     )
     for column, name in enumerate(recording.channels):
@@ -387,23 +376,17 @@ def clean_recording(recording, config):
         "paired_width_sec": [0.6, 8],
         "paired_tolerance_sec": 1.5,
         "paired_protection_margin_sec": 1.0,
-        "negative_baseline_sec": 15,
-        "negative_sigma_sec": 0.07,
-        "negative_min_duration_sec": 0.30,
         "baseline_block_sec": 1.0,
         "baseline_gaussian_sigma_blocks": 2.0,
         "paired_mad_multiplier": 5,
         "paired_abs_p95_multiplier": 2,
         "paired_min_separation_sec": 2,
-        "negative_mad_multiplier": 6,
-        "negative_abs_p95_multiplier": 3,
         "belt_flank_abs_p95_multiplier": 3,
         "belt_flank_change_multiplier": 2,
         "spo2_detection_median_half_window_sec": 0.03,
         "spo2_same_direction_edge_separation_sec": 0.7,
         "spo2_edge_prominence_fraction": 0.5,
         "spo2_brief_event_sec": 0.25,
-        "negative_padding_sec": 0.15,
         "spo2_edge_window_sec": 0.15,
         "spo2_edge_padding_sec": 0.12,
         "spo2_long_plateau_spread_pp": 1.0,
@@ -416,7 +399,7 @@ def clean_recording(recording, config):
         "parameters": parameters,
         "channels": channel_info,
         "events": events,
-        "paired_breath_candidates_sec": (paired / recording.fs_hz).tolist(),
+        "paired_peak_protection_centres_sec": (paired / recording.fs_hz).tolist(),
         "sources": {
             "test_cleaning.py": BELT_SOURCE_SHA256,
             "test_spo2_cleaning.py": SPO2_SOURCE_SHA256,
@@ -430,7 +413,7 @@ def clean_recording(recording, config):
             sort_keys=True,
         ).encode()
     ).hexdigest()
-    candidates = candidate_intervals(recording, masks, events, signature)
+    candidates = candidate_intervals(recording, masks, events, signature, source_stage="early_cleaning")
     provenance["candidates"] = candidates
     corrected.setflags(write=False)
     for mask in masks.values():

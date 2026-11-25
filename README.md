@@ -59,13 +59,11 @@ repository root through the normal Python search path. Use
 `from dbat.io.recording import load_dat_recording` and
 `from dbat.preprocessing.pipeline import preprocess_recording`.
 
-`preprocessing/pipeline.py` orchestrates automatic correction, accepted polarity,
-QC masks, per-belt native detrending/filtering, optional resampling and one
-processed-grid smoothing pass. Stage parameters, channel loops, support masks and
-diagnostics live in `detrending.py`, `filtering.py` and `smoothing.py`. Recording
-metadata assembly stays with IO. Existing pipeline entry points remain available
-through compatibility imports; the result class, numerical order, provenance
-values and HDF5 format are unchanged.
+`preprocessing/pipeline.py` orchestrates early correction, polarity, native
+conditioning, optional resampling, one smoothing pass, then review-only quality
+assessment. `signal_quality.py` owns residual noise metrics; `impact.py` owns MAE.
+Helpers are imported from their defining modules. There are no compatibility
+re-exports, historical-format readers or preprocessing-cache reuse paths.
 
 ## Stage checks and respiratory peak detection
 
@@ -170,18 +168,11 @@ This processes Sub1/M1, Sub1/M2 and Sub2/M2. Lists are a Cartesian product, not
 paired by position. The distributed default selects only Sub1/M1. Excluded pairs
 are skipped; cancelling a recording's GUI skips that recording and continues.
 Missing/malformed input or processing errors stop the run with an actionable error.
-Both preprocessing scripts use the same shared workflow. With
-`preprocessing.reuse_preproc = true` (the default), they load the newest compatible
-completed `runN` from the recording's output folder, checking run numbers in
-descending numeric order. Source identity/SHA-256, native and processed grids,
-channel order, schema, processing versions/settings, selected QC channels and QC
-annotations must match. Incompatible runs are logged and partial writes are
-ignored. Cache hits leave existing outputs unchanged and skip the QC GUI.
-Set `reuse_preproc = false` to save a new run while still reusing accepted QC.
-Set `qc.review_again = true` with `qc.open_gui = true` to bypass the cache and
-explicitly reopen accepted QC for editing. Changes to numerical settings create a
-new run without requiring another review when QC remains compatible.
-New results receive the checker's existing round-trip checks.
+Both preprocessing scripts use the same shared workflow. Every invocation
+recomputes the current pipeline and saves a new immutable run. Accepted current
+QC can still be reused; `qc.review_again = true` with `qc.open_gui = true` explicitly
+opens it for further review. `run_preprocessing()` returns `(result, path)`; GUI
+cancellation returns `(None, None)`. New runs receive the existing round-trip checks.
 
 `run.verbosity` controls all DBAT console progress through the shared `dbat` logger:
 **0** is silent, **1** (default) shows recording IDs and high-level steps, and
@@ -212,7 +203,7 @@ Configured filenames are resolved for each pair. To inspect an explicitly named
 `.dat`, set `input.dat_file` and select exactly one subject and one measurement;
 identity, filename fs and column layout are still validated. Whenever processing
 is needed, the latest source-compatible accepted QC is loaded automatically from
-completed or pending run folders, with legacy `qc/` folders also searched.
+completed or pending current-format run folders.
 If none exists, annotations start unreviewed. Acceptance time determines the newest
 compatible review; copying QC to another run does not renew its acceptance.
 `qc.open_gui` still controls review before processing. Optional explicit paths
@@ -231,22 +222,25 @@ each result.
 
 ## Automatic cleaning and relative belt polarity
 
-When a compatible saved result cannot be reused, `check_recording()` loads QC,
-computes automatic corrections and optional polarity diagnostics once, then passes
-that cached preparation to the existing QC GUI when enabled. Accepted polarity is
-applied to a fresh corrected copy before native detrending/filtering, optional primary resampling and one processed-grid
-smoothing pass. The QC GUI then displays that final provisional signal. Accepted
-QC is preserved before final recomputation and saving. ECG/BP are
-unchanged by automatic cleaning. No downstream features or labels are computed.
+The workflow loads accepted QC, prepares early corrections once, applies
+source-relative polarity, detrending/filtering, optional primary resampling and
+one smoothing pass, then calculates review-only quality and MAE. The GUI reviews
+that actual final provisional waveform. Accepted QC is preserved before final
+recomputation and saving. ECG/BP do not receive belt correction or quality metrics.
 
-`preprocessing.artifacts` enables automatic cleaning by default. Belts use the latest
-user-supplied `test_cleaning.py`: a 0.40 s median residual, robust spike threshold,
-0.035 s dilation and 0.6 s grouping. Only finite, compatible, bounded intervals up
-to `belt_max_interpolation_sec` (default/cap 0.25 s) are interpolated. Large positive
-paired peaks with 0.6–8 s widths and centers within 1.5 s are protected; this does
-not classify them as sighs. Longer disturbances and sustained negative displacements
-stay unchanged and are flagged for review. All windows use the actual native rate.
-Experimental gap and baseline-removal previews are not production cleaned signals.
+`preprocessing.artifacts` enables conservative early cleaning. Its 0.40 s median
+residual, spike threshold, 0.035 s dilation and 0.6 s grouping are unchanged. Only
+finite, compatible, bounded spikes lasting at most `belt_max_interpolation_sec`
+(default/cap 0.25 s) are interpolated. Ambiguous events remain numerical and are
+flagged for review. **Sustained baseline-displacement detection is removed** from
+this stage; baseline correction belongs only to `detrending.py`.
+
+`paired_breath_protection = false` is the default. Enabling it retains the existing
+paired-peak safeguard (0.6–8 s widths, centres within 1.5 s) solely to prevent
+interpolation near paired events. Synchronization is never physiological evidence
+or a large-breath/sigh classification. Turning it off retains every duration,
+flank-compatibility, finite-data and boundary safeguard. The setting and effective
+algorithm versions are recorded in provenance.
 
 `preprocess_spo2()` adapts the supplied SpO2 experiment: abrupt changes of at least
 `spo2_change_threshold_pp` (8 percentage points) within about 0.15 s must reverse
@@ -324,14 +318,14 @@ timestamps are saved separately from the manual QC evidence.
   manual interval bounds always use the original native grid.
 - **Previous/Next candidate** selects and centres each consolidated automatic warning.
   The interval, channel, detector reason(s) and resolution are shown. Decisions are
-  enabled only while the selected candidate is visible. **Keep physiological /
-  dismiss** retains numerical values and removes its unresolved warning without
+  enabled only while the selected candidate is visible. **Dismiss / keep waveform** retains numerical values and removes its unresolved warning without
   marking unrelated samples inspected. **Confirm artifact** creates a native manual
   annotation and excludes it through validity masks, without new interpolation.
   Original detections, protection reasons and interpolation evidence remain in
   provenance; explicit decisions retain reviewer/time and preparation identity.
-  Teal hatching identifies automatically interpolated samples; orange identifies
-  unresolved candidates. Resolved candidates remain available for inspection.
+  Teal hatching identifies initial interpolation, orange early unresolved
+  candidates, and purple final residual-noise candidates. Candidate reasons and
+  reviewer decisions retain their source stage. Resolved candidates remain available for inspection.
   Removing a confirmed candidate's manual artifact reopens its warning; the prior
   decision remains in the audit history.
 - The polarity section is shown only when
@@ -353,17 +347,16 @@ timestamps are saved separately from the manual QC evidence.
 
 ## Signal hierarchy and the single respiratory input
 
-New results use schema **`dbat_preprocessing_v4`** and one root signal dataset:
+New results use schema **`dbat_preprocessing_v5`** and one root signal dataset:
 
 | HDF5 dataset | Python result | Meaning |
 |---|---|---|
 | `preproc_signal` | `result.preproc_signal` | Final artifact-corrected, polarity-adjusted, optionally detrended/filtered/resampled and once-smoothed signal |
 
 Original and intermediate signal arrays are not saved. The source `.dat` stays
-unchanged and is identified by path/hash and its native rate/time axis. In-memory
-`result.smoothed` remains an alias of the final array for existing callers;
-`result.preprocessed` is available after computation but is `None` when reloading
-a new cached run, because that intermediate is no longer stored.
+unchanged and is identified by path/hash and its native rate/time axis.
+`result.preproc_signal` is the sole final waveform field. Intermediate values are
+used only in memory for conditioning and impact metrics.
 
 `prepared["corrected"]` remains a temporary, source-oriented input for initial
 technical QC and polarity assessment; it is not saved as a fourth canonical signal.
@@ -374,8 +367,7 @@ then recomputes the accepted result; the writer rejects provisional previews.
 A failed preview is cleared and reported rather than silently reused.
 
 **All future respiratory analysis starts from `result.preproc_signal`.**
-`result.respiratory_signal` is a direct alias for that same array, with no copy,
-selection logic or extra smoothing. Use its relevant belt columns for peak/trough
+No alternative waveform alias or second general smoothing pass is provided. Use its relevant belt columns for peak/trough
 detection and editing, amplitudes/IBIs, session references and excursion statistics,
 physiological, spectral, wavelet, connectivity and thoracoabdominal features, and
 any derived labeling/phenotypes. Downstream detectors must not apply the general
@@ -396,15 +388,14 @@ include an unsmoothed raw-excursion reference, and
 uses recording columns for Welch calculations. Its
 [respiratory features](https://github.com/NinaOmejc/magma-labeling/blob/main/src/feature_extraction/compute_respiratory_features.m)
 also consume breath-derived evidence. DBAT standardizes all these future inputs on
-`smoothed`, including raw-excursion-type and spectral calculations. Numerical
+`preproc_signal`, including raw-excursion-type and spectral calculations. Numerical
 MATLAB equivalence is not claimed.
 
 At 200 Hz, the default smoother remains MATLAB-centered **50-sample moving mean**
 (`0.25 s`), including even-window alignment and shrinking endpoints. Optional
 `savitzky_golay` retains its odd window/polyorder settings. With smoothing `none`,
-`smoothed` equals `preprocessed`. SpO2 never receives belt smoothing, detrending or Butterworth filtering,
-so its two representations are identical and contain its corrected numerical
-values. ECG/BP and other channels without an applicable method also pass through.
+`preproc_signal` equals the in-memory `preprocessed` stage. SpO2 never receives belt smoothing, detrending or Butterworth filtering,
+so its saved values contain only the artifact correction and optional common-grid resampling. ECG/BP and other channels without an applicable method also pass through.
 
 Detrending remains **none** by default because `DeTr_Norm.dat` can already include
 external detrending/normalization. Optional `moving_detrend` retains the odd 60 s
@@ -435,6 +426,84 @@ confirmed artifacts or missing gaps. Optional IIR filters follow the complete
 finite waveform across QC/artifact flags. Skips record their
 native or processed coordinate basis. Interpolation influence is retained separately;
 filtering and upsampling never create manual evidence.
+
+## Final residual quality (review only)
+
+```toml
+[preprocessing.signal_quality]
+enabled = true
+window_sec = 30.0
+step_sec = 10.0
+flag_candidates = true
+respiratory_band_hz = [0.05, 1.0]
+noise_band_hz = [2.0, 20.0]
+welch_segment_sec = 8.0
+min_finite_fraction = 0.9
+```
+
+Metrics are calculated separately for both respiratory belts. Native **cleaned,
+pre-filter/pre-smoothing** samples estimate input noise; the actual final waveform
+measures residual usability. This stage never modifies values or validity masks,
+interpolates data, detects baseline shifts/sharp spikes, or classifies breaths.
+Manual confirmation remains the only way a warning becomes an excluded artifact.
+
+- `hf_noise_ratio` is HF band energy divided by respiratory-band energy on native
+  cleaned values. `final_hf_noise_ratio` is the corresponding final-waveform ratio.
+  PSD uses [SciPy median Welch](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html),
+  periodic Hann, 50% overlap, constant segment detrending and density scaling.
+  Trapezoidal integration interpolates PSD values at band edges. Energies use
+  squared supplied-amplitude units; ratios are dimensionless. At 200 Hz, the
+  eight-second segment has 1600 samples and 0.125 Hz frequency resolution.
+- `noise_instability_db` is the absolute change in native HF energy,
+  `abs(10*log10(current/previous))`, between adjacent windows. The first window
+  and undefined/zero-energy neighbours are `null`.
+- `flatline_fraction` counts exact identical-value finite runs lasting at least
+  one second. It is not a low-amplitude threshold and does not flag by itself.
+  `clipping_fraction` counts repeated plateaus of at least 0.25 s at the same
+  recording extreme, requiring at least three separate plateaus. These are
+  inferred saturation indicators, not known hardware rail values. Only a whole
+  constant recording or substantial repeated clipping independently raises a
+  review warning; an isolated flat-topped excursion does not.
+
+Complete native-time windows are used; the unassessed tail is recorded. Short
+recordings have explicitly undefined window metrics. PSD requires one contiguous
+finite run covering at least 90% of the window and two segment lengths; no missing
+values are filled. The final HF band is capped at processed Nyquist; unavailable
+bands yield `null`. Native bands must be separate/increasing and below native
+Nyquist. Window/step/segment/coverage settings are validated before processing.
+
+Conservative research heuristics use six scaled MADs in log-energy/log-ratio
+space (at least six reference windows), a minimum 6 dB noise-energy increase,
+and an HF energy floor relative to typical recording respiratory energy. Residual
+HF energy must also remain elevated after preprocessing. Strong HF dominance,
+repeated clipping (>=10%) or an entirely constant waveform can raise a warning.
+These rules do not use respiratory amplitude alone: irregular rhythm, large smooth
+excursions and apnea-like low-amplitude breathing are not noise labels. Thresholds
+and numerical definitions are saved. This is not a calibrated clinical detector.
+
+Per-window boundaries, metrics, reasons and native candidate evidence are stored
+under `metadata_json.signal_quality` (also `summary.json.signal_quality`), with
+recording medians, robust dB noise variability and flagged-window proportions.
+`processing.signal_quality` records settings, algorithm and summaries. There is
+no combined 0–1 quality score. `flag_candidates=false` keeps metrics/threshold
+flags while disabling GUI warning generation. Decisions retain their original
+candidate evidence, stage, reviewer and time. No classification features are built.
+
+## Preprocessing-impact MAE (separate from noisiness)
+
+`processing.preprocessing_impact` stores per-belt 30-second/10-second MAEs for:
+original→cleaned, cleaned→detrended, detrended→final, and original→final. All
+stages share the applied source-relative polarity; a sign flip alone is excluded.
+The first two comparisons use native samples. The last two linearly align native
+references to final timestamps using only finite bracketing samples and physical
+time overlap, without filtering the reference or bridging missing gaps.
+
+Each MAE uses paired finite samples; coverage below 90% is `null`. Complete-window
+status, coverage and pair counts accompany every result. Recording MAE uses each
+sample once, rather than averaging overlapping-window MAEs. Settings, rates,
+polarity policy and effective stage parameters are saved in HDF5 `metadata_json`
+and mirrored in `summary.json`. Intermediate waveforms are never saved. MAE is
+not stored in `qc.json`, never used for noise warnings and never excludes samples.
 
 ## Optional robust median detrending
 
@@ -565,13 +634,13 @@ contains exact matching QC in `qc.json`, HDF5 metadata and `summary.json`.
 Reused decisions retain their original reviewer/acceptance timestamp. Headless
 unreviewed runs also store `qc.json`, explicitly without acceptance or invented review.
 
-QC overrides accept `qc.json`, legacy timestamp QC JSON, or any supported summary
-JSON. Automatic discovery validates identity, source hash and native sampling grid.
-Legacy `qc/`, timestamp `runs/` and earlier outputs are neither migrated nor deleted.
-Cache hits require matching source/grids/settings/algorithms/QC and, for v4, matching
-run-local `qc.json`; pending runs are never reused as completed preprocessing.
+QC overrides accept current `qc.json` or current `summary.json`. Automatic
+discovery validates identity, source hash and the native grid. Current formats
+are **`dbat_preprocessing_v5`** and **`dbat_qc_v2`**. Older readers, mappings and
+legacy QC-folder discovery have been removed. Existing files are not migrated,
+overwritten or deleted; regenerate outputs using the current pipeline.
 
-`SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v4`**:
+`SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v5`**:
 
 - `/preproc_signal`: the only saved signal array, on the processed grid.
 - `/original_time_sec`, `/processed_time_sec`, `original_fs_hz` and
@@ -596,12 +665,8 @@ time_sec = saved["processed_time_sec"]
 valid = saved["masks"]["valid"]
 ```
 
-The reader also accepts **v1, v2 and v3**. Their actual stored arrays remain
-available through `signals` (and `resampled` where present); `preproc_signal`
-references their final native waveform. Metadata and mask values are preserved.
-No missing original/intermediate arrays are fabricated for v4 files. A v4 cache
-request recomputes an older-schema run into a new immutable run rather than
-modifying it. Native `.dat` loading remains unchanged.
+The reader accepts the current format only. Every new preprocessing request
+creates a new run; accepted QC reuse remains independent of numerical processing.
 
 Inspect the most recent output after a successful run:
 

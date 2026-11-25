@@ -14,6 +14,7 @@ from ..logging import logger
 from .annotations import (
     RATINGS,
     active_candidate_resolutions,
+    review_candidates,
     unresolved_candidate_mask,
     make_interval,
     merge_artifact_intervals,
@@ -24,16 +25,16 @@ from .annotations import (
     utc_now,
     validate_qc_annotations,
 )
-from .pipeline import prepare_recording, preprocess_recording
+from .cleaning import prepare_recording
+from .pipeline import preprocess_recording
 from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
 
 DISPLAY_MODES = ("original", "cleaned", "preprocessed")
 DISPLAY_LABELS = ("Original", "Cleaned", "Preprocessed + Original")
 CANDIDATE_REASONS = {
-    "preserved_possible_paired_breath": "Possible physiological breath (paired-belt protection)",
+    "paired_peak_protection": "Optional paired-peak safeguard (not physiological evidence)",
     "too_long_to_reconstruct": "Too long to interpolate safely",
     "incompatible_flanks": "Incompatible interpolation endpoints",
-    "sustained_negative_displacement": "Sustained displacement or ambiguous artifact",
     "missing_or_boundary_flank": "Missing or boundary interpolation endpoint",
     "boundary_or_duration_limit": "Boundary or safe interpolation duration exceeded",
     "insufficient_flanks": "Insufficient reliable interpolation endpoints",
@@ -42,6 +43,10 @@ CANDIDATE_REASONS = {
     "insufficient_excursion": "Ambiguous excursion",
     "unstable_flanks": "Unstable interpolation endpoints",
     "nonflat_long_event": "Ambiguous long event",
+    "residual_high_frequency_noise": "Residual high-frequency noise after preprocessing",
+    "unstable_noise_energy": "Unstable high-frequency noise energy",
+    "possible_sensor_clipping": "Possible repeated sensor-rail clipping",
+    "constant_waveform": "Constant digital waveform; technical review needed",
 }
 
 
@@ -97,10 +102,9 @@ class ManualQCEditor:
         if recording_identity(self.preview.recording) != recording_identity(recording):
             raise ValueError("Preprocessed preview does not match this recording")
         self.preview_error = None
-        self.candidates = [
-            item for item in self.prepared["candidates"] if item["channel"] in self.channels
-        ]
+        self.candidates = []
         self.candidate_index = 0
+        self._update_candidates()
         self.result = None
         self.start = 0
         self.window = min(
@@ -136,7 +140,8 @@ class ManualQCEditor:
                 self.original_lines[0],
                 self.lines[0],
                 Patch(facecolor="teal", alpha=0.2, hatch="//", label="Interpolated"),
-                Patch(facecolor="orange", alpha=0.2, label="Candidate: review"),
+                Patch(facecolor="orange", alpha=0.2, label="Early candidate"),
+                     Patch(facecolor="purple", alpha=0.2, label="Residual noise"),
             ],
             loc="upper right",
             fontsize=7,
@@ -247,7 +252,7 @@ class ManualQCEditor:
         )
         self.candidate_keep = self._button(
             (0.28, 0.245, 0.23, 0.035),
-            "Keep physiological / dismiss",
+            "Dismiss / keep waveform",
             lambda event: self._resolve_candidate("dismiss"),
         )
         self.candidate_confirm = self._button(
@@ -453,6 +458,20 @@ class ManualQCEditor:
         self.scale_mode = label.lower()
         self._draw()
 
+    def _update_candidates(self):
+        """Refresh one review list for early and final-stage warnings and audit snapshots."""
+        selected = (
+            self.candidates[self.candidate_index]["id"] if self.candidates else None
+        )
+        self.candidates = [
+            item
+            for item in review_candidates(
+                self.qc, self.prepared, self.preview.signal_quality
+            )
+            if item["channel"] in self.channels
+        ]
+        self.candidate_index = next((index for index, item in enumerate(self.candidates) if item["id"] == selected), 0)
+
     def _refresh_preview(self):
         """Recompute private decisions; failed previews are cleared, never reused."""
         qc = deepcopy(self.qc)
@@ -468,6 +487,8 @@ class ManualQCEditor:
             )
         except (ValueError, FloatingPointError) as error:
             self.preview_error = str(error)
+        if self.preview is not None:
+            self._update_candidates()
         self._draw()
 
     def _select_candidate(self, direction):
@@ -493,7 +514,7 @@ class ManualQCEditor:
         ):
             self._select_candidate(0)
             return
-        if candidate["id"] in active_candidate_resolutions(self.qc, self.prepared):
+        if candidate["id"] in active_candidate_resolutions(self.qc, self.prepared, self.candidates):
             return
         resolution = make_interval(
             candidate["start_sample"],
@@ -505,7 +526,8 @@ class ManualQCEditor:
         resolution.update(
             candidate_id=candidate["id"],
             decision=decision,
-            preparation_signature=self.prepared["signature"],
+            preparation_signature=candidate["preparation_signature"],
+            source_stage=candidate["source_stage"], candidate=deepcopy(candidate),
             reasons=candidate["reasons"].copy(),
         )
         self.qc.setdefault("candidate_resolutions", []).append(resolution)
@@ -633,8 +655,9 @@ class ManualQCEditor:
         for patch in self.shading:
             patch.remove()
         self.shading.clear()
-        unresolved = unresolved_candidate_mask(self.qc, self.prepared)
-        resolutions = active_candidate_resolutions(self.qc, self.prepared)
+        unresolved = unresolved_candidate_mask(self.qc, self.prepared, self.candidates)
+        unresolved_noise = unresolved_candidate_mask(self.qc, self.prepared, self.candidates, source_stage="signal_quality")
+        resolutions = active_candidate_resolutions(self.qc, self.prepared, self.candidates)
         selected = self.candidates[self.candidate_index] if self.candidates else None
         for axis, name, column, line, original in zip(
             self.axes, self.channels, self.columns, self.lines, self.original_lines, strict=True
@@ -650,6 +673,7 @@ class ManualQCEditor:
             for mask, color, hatch in (
                 (self.prepared["masks"]["interpolated"], "teal", "//"),
                 (unresolved, "orange", None),
+                (unresolved_noise, "purple", None),
             ):
                 for first_flag, last_flag in continuous_runs(mask[self.start : end, column]):
                     self.shading.append(
@@ -668,7 +692,7 @@ class ManualQCEditor:
                         selected["start_sec"],
                         selected["end_sec"],
                         facecolor="none",
-                        edgecolor="darkorange",
+                        edgecolor="purple" if selected["source_stage"] == "signal_quality" else "darkorange",
                         lw=1.7,
                     )
                 )
@@ -730,7 +754,7 @@ class ManualQCEditor:
                 CANDIDATE_REASONS.get(code, code.replace("_", " ")) for code in selected["reasons"]
             )
             self.candidate_info.set_text(
-                f"Candidate {self.candidate_index + 1}/{len(self.candidates)} | {selected['channel']} | {selected['start_sec']:.2f}–{selected['end_sec']:.2f} s | {state}\n"
+                f"{'Residual noise' if selected['source_stage'] == 'signal_quality' else 'Early candidate'} {self.candidate_index + 1}/{len(self.candidates)} | {selected['channel']} | {selected['start_sec']:.2f}–{selected['end_sec']:.2f} s | {state}\n"
                 + fill(reason, 110)
             )
         else:

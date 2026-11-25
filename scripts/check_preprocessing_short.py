@@ -2,7 +2,7 @@
 
 Run: python scripts/check_preprocessing_short.py
 Edit configs/default.toml to select recordings, QC review, methods and output.
-Reuses compatible runs or saves versioned HDF5, summary.json and an optional preview.
+Saves a new immutable run with final HDF5, QC, metrics, summary and optional preview.
 """
 
 import json
@@ -33,7 +33,7 @@ def main():
                 config, config["input"]["dat_file"] or None,
                 subject=subject, measurement=measurement,
             )
-            result, path, reused = run_preprocessing(recording, config)
+            result, path = run_preprocessing(recording, config)
             if path is None:
                 continue
 
@@ -50,7 +50,7 @@ def main():
             assert saved["metadata"]["qc"] == result.qc
             with (path.parent / "qc.json").open(encoding="utf-8") as stream:
                 assert json.load(stream) == result.qc
-            logger.info("%s: %s", "Reused" if reused else "Saved and checked", path)
+            logger.info("Saved and checked: %s", path)
             logger.info("Inspect: %s", path.parent / (
                 "preview.png" if config["output"]["save_preview"] else "summary.json"
             ))
