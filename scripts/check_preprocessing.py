@@ -484,6 +484,7 @@ def verify_saved_result(path, result):
         "original_time_sec": result.original_time_sec,
         "processed_time_sec": result.processed_time_sec,
         **{f"masks/{name}": mask for name, mask in result.masks.items()},
+        "masks/respiratory_valid_both": result.respiratory_valid_both,
     }
     with h5py.File(path, "r") as handle:
         metadata = json.loads(handle["metadata_json"].asstr()[()])
@@ -526,6 +527,10 @@ def verify_saved_result(path, result):
         if metadata["qc"] != result.qc:
             raise ValueError("Saved QC annotations differ from the accepted input")
         validate_qc_annotations(metadata["qc"], recording)
+        joint = handle["masks/respiratory_valid_both"]
+        if (joint.attrs["fs_hz"] != result.processed_fs_hz
+                or joint.attrs["time_axis"] != "processed_time_sec"):
+            raise ValueError("Joint respiratory validity is not on the processed grid")
         if (
             metadata["signal_quality"] != result.signal_quality
             or metadata["processing"]["preprocessing_impact"]

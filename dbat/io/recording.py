@@ -14,7 +14,7 @@ import h5py
 import numpy as np
 
 from .. import __version__
-from ..config import RESULT_SCHEMA
+from ..config import BELTS, RESULT_SCHEMA
 from ..logging import logger
 from ..preprocessing.annotations import (
     annotation_masks,
@@ -272,7 +272,11 @@ def load_latest_qc_annotations(recording, config):
 
 
 def load_preprocessing_result(path):
-    """Read the current final signal, grids, masks, metrics and provenance."""
+    """Read final output; derive joint validity if absent in an older v5 file.
+
+    ``masks`` remains the per-channel matrix dictionary. The shared 1-D mask is
+    returned separately as ``respiratory_valid_both``; stored metadata is unchanged.
+    """
     path = Path(path).resolve(strict=True)
     if not path.is_file():
         raise ValueError(f"Expected a DBAT HDF5 file, not a directory: {path}")
@@ -282,13 +286,29 @@ def load_preprocessing_result(path):
         metadata = json.loads(handle["metadata_json"].asstr()[()])
         if metadata["schema_version"] != RESULT_SCHEMA:
             raise ValueError("HDF5 and embedded metadata schemas disagree")
+        channels = handle["channels"].asstr()[:].tolist()
+        masks = {
+            name: dataset[:]
+            for name, dataset in handle["masks"].items()
+            if name != "respiratory_valid_both"
+        }
+        lungs, diaphragm = (channels.index(name) for name in BELTS)
+        joint = masks["valid"][:, lungs] & masks["valid"][:, diaphragm]
+        if "masks/respiratory_valid_both" in handle:
+            saved_joint = handle["masks/respiratory_valid_both"][:]
+            if saved_joint.dtype != bool or not np.array_equal(saved_joint, joint):
+                raise ValueError(
+                    "Joint respiratory validity disagrees with per-channel validity"
+                )
+            joint = saved_joint
         return {
             "schema_version": RESULT_SCHEMA,
             "metadata": metadata,
             "preproc_signal": handle["preproc_signal"][:],
             "respiratory_analysis_source": "preproc_signal",
-            "channels": handle["channels"].asstr()[:].tolist(),
-            "masks": {name: dataset[:] for name, dataset in handle["masks"].items()},
+            "channels": channels,
+            "masks": masks,
+            "respiratory_valid_both": joint,
             "original_time_sec": handle["original_time_sec"][:],
             "processed_time_sec": handle["processed_time_sec"][:],
             "original_fs_hz": float(handle.attrs["original_fs_hz"]),
@@ -313,6 +333,15 @@ def result_metadata(result, config):
                           "n_samples": len(result.original), "mask_basis": "Native QC intervals in qc"},
         "processed_grid": {"fs_hz": result.processed_fs_hz, "time_axis": "processed_time_sec",
                            "n_samples": len(result.preproc_signal), "mask_basis": "All masks/*"},
+        "respiratory_valid_both": {
+            "dataset": "masks/respiratory_valid_both",
+            "time_axis": "processed_time_sec",
+            "fs_hz": result.processed_fs_hz,
+            "channels": list(BELTS),
+            "definition": "valid Resp-Lungs AND valid Resp-Diaphragm; candidates are informational",
+            "valid_samples": int(result.respiratory_valid_both.sum()),
+            "valid_fraction": float(result.respiratory_valid_both.mean()),
+        },
         "channel_summary_basis": "Manual coverage/artifact durations use native QC; mask counts/valid fractions use the processed grid",
         "import_validation": "passed: numeric matrix, identity, channels and configured sampling rate",
         "identity": recording_identity(recording),
@@ -393,10 +422,16 @@ def save_preprocessing_result(result, config, *, run_dir=None):
             "original_time_sec": result.original_time_sec,
             "processed_time_sec": result.processed_time_sec,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
+            "masks/respiratory_valid_both": result.respiratory_valid_both,
         }.items():
             handle.create_dataset(name, data=values, compression="gzip", shuffle=True)
         handle["preproc_signal"].attrs["fs_hz"] = result.processed_fs_hz
         handle["preproc_signal"].attrs["time_axis"] = "processed_time_sec"
+        joint = handle["masks/respiratory_valid_both"]
+        joint.attrs["array_axes"] = "samples"
+        joint.attrs["time_axis"] = "processed_time_sec"
+        joint.attrs["fs_hz"] = result.processed_fs_hz
+        joint.attrs["definition"] = "valid Resp-Lungs AND valid Resp-Diaphragm"
         handle.create_dataset(
             "metadata_json",
             data=json.dumps(metadata, ensure_ascii=False, allow_nan=False),

@@ -7,6 +7,7 @@ import json
 
 import numpy as np
 
+from ..config import BELTS
 from ..io.recording import (
     Recording,
     load_latest_qc_annotations,
@@ -62,6 +63,12 @@ class PreprocessedRecording:
     def original_time_sec(self):
         """Return the original zero-origin native time axis in seconds."""
         return self.recording.time_sec
+
+    @property
+    def respiratory_valid_both(self):
+        """Return joint belt validity on the processed grid, independent of warnings."""
+        lungs, diaphragm = (self.recording.channels.index(name) for name in BELTS)
+        return self.masks["valid"][:, lungs] & self.masks["valid"][:, diaphragm]
 
     def require_native_grid(self):
         """Reject direct historical native landmark-index reuse on a changed grid.

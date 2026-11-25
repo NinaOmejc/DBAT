@@ -160,6 +160,7 @@ class ManualQCEditor:
             Patch(facecolor="teal", alpha=0.2, hatch="//", label="Interpolated"),
             Patch(facecolor="orange", alpha=0.2, label="Early candidate"),
             Patch(facecolor="purple", alpha=0.2, label="Residual noise"),
+            Patch(facecolor="0.6", edgecolor="0.4", alpha=0.2, hatch="xx", label="Other belt warning"),
         ]
         self.axes[-1].set_xlabel("Time (seconds); annotations use native samples")
         self.status = self.figure.text(0.09, 0.185, "", fontsize=9)
@@ -258,7 +259,7 @@ class ManualQCEditor:
         self.figure.text(
             0.09,
             0.155,
-            "Orange/purple candidates are informational. Draw a red region only where you confirm an artifact.",
+            "Informational warnings: solid = source belt; crossed = other belt. Draw red only to confirm artifacts.",
             fontsize=8,
         )
         self._button((0.79, 0.040, 0.09, 0.035), "Save / Done", self._save)
@@ -513,6 +514,15 @@ class ManualQCEditor:
             return
         self._interval_key = key
         self._intervals = {}
+        candidates = self.prepared["candidates"] + (
+            quality["candidates"] if quality else []
+        )
+        self._candidate_ranges = [
+            (item["start_sample"], item["end_sample"])
+            for item in candidates
+            if item["channel"] in self.channels
+            or (item["channel"] in BELTS and self.belt_channels)
+        ]
         for name, column in zip(self.channels, self.columns, strict=True):
             groups = {
                 "interpolated": list(
@@ -529,6 +539,31 @@ class ManualQCEditor:
                 if quality
                 else [],
             }
+            other = (
+                next((belt for belt in BELTS if belt != name), None)
+                if name in BELTS
+                else None
+            )
+            groups["early_other"] = (
+                list(
+                    continuous_runs(
+                        self.prepared["masks"]["auto_candidate"][
+                            :, self.recording.channels.index(other)
+                        ]
+                    )
+                )
+                if other
+                else []
+            )
+            groups["noise_other"] = (
+                [
+                    (item["start_sample"], item["end_sample"])
+                    for item in quality["candidates"]
+                    if item["channel"] == other
+                ]
+                if other and quality
+                else []
+            )
             for field in ("reviewed_intervals", "artifacts"):
                 groups[field] = [
                     (item["start_sample"], item["end_sample"])
@@ -670,7 +705,6 @@ class ManualQCEditor:
                 max(limits[name][1] for name in self.belt_channels),
             )
             limits.update(dict.fromkeys(self.belt_channels, bounds))
-        visible = 0
         for axis, name, column, line, original in zip(
             self.axes,
             self.channels,
@@ -696,6 +730,8 @@ class ManualQCEditor:
             original.get_path().should_simplify = False
             for kind, color, alpha, hatch in (
                 ("interpolated", "teal", 0.18, "//"),
+                ("early_other", "orange", 0.14, "xx"),
+                ("noise_other", "purple", 0.14, "xx"),
                 ("early", "orange", 0.18, None),
                 ("noise", "purple", 0.18, None),
                 ("reviewed_intervals", "tab:green", 0.10, None),
@@ -705,8 +741,6 @@ class ManualQCEditor:
                 lo = np.searchsorted(intervals[:, 1], self.start, side="right")
                 hi = np.searchsorted(intervals[:, 0], end, side="left")
                 shown = intervals[lo:hi]
-                if kind in {"early", "noise"}:
-                    visible += len(shown)
                 pool = self._patch_pool.setdefault((name, kind), [])
                 for index, (a, b) in enumerate(shown):
                     if index == len(pool):
@@ -789,6 +823,7 @@ class ManualQCEditor:
             )
         for axis in self.axes:
             axis.set_xlim(lower, upper, emit=False)
+        visible = sum(first < end and last > self.start for first, last in self._candidate_ranges)
         message = f"Native samples [{self.start}, {end}) | {len(self.qc['artifacts'])} manual artifacts | {visible} automatic candidates in view"
         if self.preview_error:
             message += f"\nFinal preview unavailable: {self.preview_error}"

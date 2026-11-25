@@ -246,6 +246,19 @@ finite context remains unchanged and flagged. Both signs are checked; belt
 synchronization is unnecessary. These are conservative technical safeguards,
 not breath/sigh labels. Numeric evidence and parameters are saved in provenance.
 
+A separate `abrupt_excursion_candidates()` pass detects large, rapid excursions
+of either sign **for review only**, after existing spike correction. A temporary
+20 ms Gaussian estimate measures local prominence in a 10 s neighbourhood and
+90%-prominence durations of 0.25–4 s. Each side supplies at least 4 s of finite
+reference data, drawn from up to 15 s with a 0.5 s guard. Prominence must exceed
+both four scaled MADs and 1.5 times the reference P90–P10 span; peak slope must
+exceed both four times reference P95 absolute slope and six scaled MADs. The
+maximum slope/prominence must also be at least 3/s, preserving smooth broad
+excursions from amplitude-only warnings. Gaps split assessment; no filling is
+used. All settings, signs, native bounds and actual local thresholds are saved
+under automatic-cleaning provenance. These are review heuristics, not breath or
+sigh classifications. This pass never changes samples, interpolation or validity.
+
 `paired_breath_protection = false` is the default. Enabling it retains the existing
 paired-peak safeguard (0.6–8 s widths, centres within 1.5 s) solely to prevent
 interpolation near paired events. Synchronization is never physiological evidence
@@ -339,8 +352,11 @@ timestamps are saved separately from the manual QC evidence.
   stage is retained internally for processing-impact metrics, not as a GUI view.
 - Automatic candidates are **informational only**: teal hatching shows initial
   interpolation, orange shading shows early candidates, and purple shading shows
-  residual-noise candidates. There are no candidate-selection, confirmation or
-  dismissal controls. Agree with a warning by manually drawing a red artifact;
+  residual-noise candidates. Every respiratory candidate appears on both belts:
+  solid shading marks the originating channel, and cross-hatching marks the other
+  belt. Detection evidence and masks stay channel-specific; only the display is
+  shared. SpO2 warnings remain on SpO2. There are no candidate-selection,
+  confirmation or dismissal controls. Agree with a warning by manually drawing a red artifact;
   disagree by leaving the waveform unchanged. Existing QC resolution records are
   retained when loading/saving older annotations, but never hide candidate shading.
 - The polarity section is shown only when
@@ -678,6 +694,11 @@ overwritten or deleted; regenerate outputs using the current pipeline.
   and time-axis path. Native QC interval coordinates remain unchanged.
 - `/masks/*`: all existing QC, finite, support, eligibility, validity and
   interpolation masks on the processed grid, including intermediate-stage masks.
+- `/masks/respiratory_valid_both`: a 1-D Boolean vector on `processed_time_sec`,
+  equal to `valid[:, Resp-Lungs] & valid[:, Resp-Diaphragm]`, derived after any
+  resampling and smoothing. Its dataset declares the processed rate/time axis.
+  Individual validity masks are preserved. Automatic candidates never exclude
+  samples without manual confirmation. Metadata includes joint valid counts.
 - `/channels`, `/metadata_json`: full source identity/hash, config/settings,
   algorithms, diagnostics and QC. The authoritative analysis source is `preproc_signal`.
 
@@ -693,7 +714,13 @@ respiratory_signal = saved["preproc_signal"]
 fs_hz = saved["processed_fs_hz"]
 time_sec = saved["processed_time_sec"]
 valid = saved["masks"]["valid"]
+joint_valid = saved["respiratory_valid_both"]  # result.respiratory_valid_both in memory
 ```
+
+`saved["masks"]` remains the dictionary of per-channel matrices; the shared
+vector is returned separately. Older v5 files lacking the shared dataset remain
+readable: the reader derives it from their existing validity masks in memory,
+without migrating files or inventing new QC evidence. QC JSON is unchanged.
 
 The reader accepts the current format only. Every new preprocessing request
 creates a new run; accepted QC reuse remains independent of numerical processing.

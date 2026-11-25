@@ -20,7 +20,7 @@ from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
-ALGORITHM_VERSION = "dbat_auto_cleaning_v3"
+ALGORITHM_VERSION = "dbat_auto_cleaning_v4"
 BELT_MORPHOLOGY = {
     "context_sec": 2.0,
     "minimum_flank_sec": 0.25,
@@ -29,6 +29,22 @@ BELT_MORPHOLOGY = {
     "respiratory_max_residual_fraction": 0.3,
     "spike_max_width_sec": 0.1,
     "spike_min_slope_ratio": 4.0,
+}
+
+
+ABRUPT_EXCURSION = {
+    "estimation_sigma_sec": 0.02,
+    "prominence_window_sec": 10.0,
+    "duration_sec": [0.25, 4.0],
+    "support_rel_height": 0.9,
+    "context_sec": 15.0,
+    "context_guard_sec": 0.5,
+    "minimum_reference_sec": 4.0,
+    "amplitude_mad_multiplier": 4.0,
+    "amplitude_span_multiplier": 1.5,
+    "slope_percentile_multiplier": 4.0,
+    "slope_mad_multiplier": 6.0,
+    "min_normalized_slope_per_sec": 3.0,
 }
 
 
@@ -257,6 +273,110 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
     return corrected, interpolated, candidates, events, info
 
 
+def abrupt_excursion_candidates(values, fs_hz):
+    """Flag unusually large, fast excursions in either sign without modifying values.
+
+    Parameters
+    ----------
+    values : ndarray, shape (native_samples,)
+        Automatically corrected belt values; only finite runs are assessed.
+    fs_hz : float
+        Native frequency in Hz. A temporary 20 ms Gaussian estimate is used only
+        for morphology; local 90%-prominence widths bound transient excursions.
+
+    Returns
+    -------
+    tuple
+        Native Boolean candidate mask, review-only events with local thresholds,
+        and assessment info. Smooth broad breaths and long baseline changes are
+        not flagged on amplitude alone. No interpolation or exclusion is applied.
+        Width/prominence use SciPy:
+        https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.find_peaks.html
+    """
+    parameters = ABRUPT_EXCURSION
+    mask, events = np.zeros(len(values), dtype=bool), []
+    assessed_runs = 0
+    context = round(parameters["context_sec"] * fs_hz)
+    guard = round(parameters["context_guard_sec"] * fs_hz)
+    minimum = parameters["minimum_reference_sec"] * fs_hz
+    for run_start, run_end in continuous_runs(np.isfinite(values)):
+        if (
+            run_end - run_start
+            < 2 * (minimum + guard) + parameters["duration_sec"][0] * fs_hz
+        ):
+            continue
+        assessed_runs += 1
+        estimate = gaussian_filter1d(
+            values[run_start:run_end],
+            sigma=parameters["estimation_sigma_sec"] * fs_hz,
+            mode="nearest",
+        )
+        slopes = np.diff(estimate) * fs_hz
+        for sign in (1, -1):
+            peaks, properties = find_peaks(
+                sign * estimate,
+                prominence=1e-10,
+                width=np.asarray(parameters["duration_sec"]) * fs_hz,
+                wlen=odd_samples(parameters["prominence_window_sec"], fs_hz),
+                rel_height=parameters["support_rel_height"],
+            )
+            for index, peak in enumerate(peaks):
+                start = int(np.floor(properties["left_ips"][index]))
+                end = int(np.ceil(properties["right_ips"][index])) + 1
+                amplitude = float(properties["prominences"][index])
+                slope = float(np.max(abs(slopes[start : end - 1])))
+                normalized_slope = slope / amplitude
+                if normalized_slope < parameters["min_normalized_slope_per_sec"]:
+                    continue
+                first, last = max(0, start - context), min(len(estimate), end + context)
+                if start - guard - first < minimum or last - end - guard < minimum:
+                    continue
+                reference = np.r_[
+                    estimate[first : start - guard], estimate[end + guard : last]
+                ]
+                reference_slopes = np.r_[
+                    slopes[first : start - guard], slopes[end + guard : last - 1]
+                ]
+                amplitude_limit = max(
+                    parameters["amplitude_mad_multiplier"] * robust_scale(reference),
+                    parameters["amplitude_span_multiplier"]
+                    * np.ptp(np.percentile(reference, [10, 90])),
+                    1e-10,
+                )
+                slope_limit = max(
+                    parameters["slope_percentile_multiplier"]
+                    * np.percentile(abs(reference_slopes), 95),
+                    parameters["slope_mad_multiplier"] * robust_scale(reference_slopes),
+                    1e-10,
+                )
+                if amplitude <= amplitude_limit or slope <= slope_limit:
+                    continue
+                lo, hi = int(run_start + start), int(run_start + end)
+                mask[lo:hi] = True
+                event = _event(lo, hi, fs_hz, "review_candidate", "abrupt_excursion")
+                event["morphology"] = {
+                    "sign": sign,
+                    "peak_sample": int(run_start + peak),
+                    "amplitude": amplitude,
+                    "amplitude_limit": float(amplitude_limit),
+                    "max_slope_per_sec": slope,
+                    "slope_limit_per_sec": float(slope_limit),
+                    "normalized_slope_per_sec": normalized_slope,
+                    "duration_sec": float(properties["widths"][index] / fs_hz),
+                }
+                events.append(event)
+    return (
+        mask,
+        events,
+        {
+            "status": "assessed" if assessed_runs else "insufficient_finite_context",
+            "event_count": len(events),
+            "finite_runs_assessed": assessed_runs,
+            "amplitude_definition": "local peak prominence",
+        },
+    )
+
+
 def preprocess_spo2(values, fs_hz, settings):
     """Interpolate abrupt, reversible SpO2 artifacts in declared percentage units.
 
@@ -453,6 +573,13 @@ def clean_recording(recording, config):
             detected,
             info,
         ) = output
+        if name in BELTS:
+            excursions, excursion_events, excursion_info = abrupt_excursion_candidates(
+                corrected[:, column], recording.fs_hz
+            )
+            masks["auto_candidate"][:, column] |= excursions & ~masks["interpolated"][:, column]
+            detected.extend(excursion_events)
+            info["abrupt_excursions"] = excursion_info
         channel_info[name] = info
         events.extend({"channel": name, **event} for event in detected)
     parameters = {
@@ -463,6 +590,7 @@ def clean_recording(recording, config):
         "belt_group_gap_sec": 0.6,
         "belt_flank_lag_sec": 0.25,
         "belt_morphology": dict(BELT_MORPHOLOGY),
+        "abrupt_excursions": dict(ABRUPT_EXCURSION),
         "paired_gaussian_sigma_sec": 0.10,
         "paired_baseline_sec": 20,
         "paired_width_sec": [0.6, 8],
