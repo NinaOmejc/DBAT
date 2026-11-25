@@ -52,7 +52,7 @@ class PreprocessedRecording:
     """Immutable native original and one primary preprocessed/smoothed sample grid."""
 
     recording: Recording
-    preprocessed: np.ndarray
+    preprocessed: np.ndarray | None
     smoothed: np.ndarray
     processed_fs_hz: float
     processed_time_sec: np.ndarray
@@ -76,8 +76,13 @@ class PreprocessedRecording:
         return self.recording.time_sec
 
     @property
+    def preproc_signal(self):
+        """Return the final authoritative waveform (the existing smoothed array)."""
+        return self.smoothed
+
+    @property
     def respiratory_signal(self):
-        """Return smoothed; detectors must use processed_fs_hz and masks['valid']."""
+        """Return preproc_signal; detectors must use processed_fs_hz and masks['valid']."""
         return self.smoothed
 
     def require_native_grid(self):
@@ -149,33 +154,55 @@ def preprocess_recording(recording, config, qc_annotations=None, prepared=None):
 
 
 def run_preprocessing(recording, config):
-    """Reuse compatible output, or load QC, review, preprocess and save a new run.
+    """Reuse output or save exact QC in a pending run before numerical processing.
 
-    Returns (PreprocessedRecording, HDF5 path, reused). GUI cancellation returns
-    (None, None, False), preserving existing results and accepted QC. Cache hits
-    skip preparation and GUI review; cache misses honor qc.open_gui as before.
+    Returns (PreprocessedRecording, HDF5 path, reused). Accepted QC is reused unless
+    qc.review_again requests another GUI review. A cache hit restores only the
+    final waveform; preprocessed is None when that intermediate was not stored.
+    Cancellation leaves prior runs intact; failed processing leaves pending QC.
     """
     qc = load_latest_qc_annotations(recording, config)
-    cached = load_reusable_preprocessing_result(recording, config, qc)
+    qc.pop("loaded_from_file", None)  # Transport metadata, not an accepted decision.
+    review_again = config["qc"]["open_gui"] and config["qc"].get("review_again", False)
+    needs_initial_review = config["qc"]["open_gui"] and not qc["accepted_at_utc"]
+    cached = (
+        None
+        if review_again or needs_initial_review
+        else load_reusable_preprocessing_result(recording, config, qc)
+    )
     if cached is not None:
         saved, path = cached
         result = PreprocessedRecording(
-            recording, saved["signals"]["preprocessed"], saved["signals"]["smoothed"],
-            saved["processed_fs_hz"], saved["processed_time_sec"], saved["masks"],
-            saved["metadata"]["qc"], saved["metadata"]["processing"],
+            recording,
+            saved.get("signals", {}).get("preprocessed"),
+            saved["preproc_signal"],
+            saved["processed_fs_hz"],
+            saved["processed_time_sec"],
+            saved["masks"],
+            saved["metadata"]["qc"],
+            saved["metadata"]["processing"],
         )
         return result, path, True
     prepared = prepare_recording(recording, config)
-    if config["qc"]["open_gui"]:
+    decision = qc.get("polarity")
+    needs_review = (
+        not qc["accepted_at_utc"]
+        or review_again
+        or (decision and decision["preparation_signature"] != prepared["signature"])
+        or (prepared["polarity"]["polarity_warning"] and not decision)
+    )
+    if config["qc"]["open_gui"] and needs_review:
         from .preproc_gui import run_qc_gui
 
         qc = run_qc_gui(recording, config, qc, prepared=prepared)
         if qc is None:
             logger.info("Cancelled %s; no result saved", recording.recording_id)
             return None, None, False
-        save_qc_annotations(qc, recording, config["paths"]["output_dir"])
+    pending = None
+    if qc["accepted_at_utc"]:
+        pending = save_qc_annotations(qc, recording, config["paths"]["output_dir"]).parent
     result = preprocess_recording(recording, config, qc, prepared=prepared)
-    path = save_preprocessing_result(result, config)
+    path = save_preprocessing_result(result, config, run_dir=pending)
     return result, path, False
 
 

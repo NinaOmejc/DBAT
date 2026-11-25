@@ -11,7 +11,8 @@ from .logging import configure_logging
 
 CHANNELS = ("ECG1", "ECG2", "SpO2", "Resp-Lungs", "Blood Pressure", "Resp-Diaphragm")
 BELTS = ("Resp-Lungs", "Resp-Diaphragm")
-RESULT_SCHEMA = "dbat_preprocessing_v3"
+RESULT_SCHEMA = "dbat_preprocessing_v4"
+READABLE_RESULT_SCHEMAS = {f"dbat_preprocessing_v{version}" for version in range(1, 5)}
 
 
 def window_samples(value, unit, fs_hz):
@@ -167,6 +168,7 @@ def _validate(config, directory):
         raise ValueError("qc.max_plot_points must be an integer >= 100")
     for value, name in [
         (qc["open_gui"], "qc.open_gui"),
+        (qc.get("review_again", False), "qc.review_again"),
         (preprocessing["check_relative_belt_polarity"], "preprocessing.check_relative_belt_polarity"),
         (preprocessing["artifacts"]["automatic_detection"], "preprocessing.artifacts.automatic_detection"),
         (preprocessing["enabled"], "preprocessing.enabled"),
@@ -233,7 +235,7 @@ def _validate(config, directory):
     if artifacts["belt_max_interpolation_sec"] > 0.25:
         raise ValueError("Belt interpolation is restricted to at most 0.25 seconds")
     if output["schema_version"] != RESULT_SCHEMA or output["overwrite"] is not False:
-        raise ValueError("Use dbat_preprocessing_v3 and output.overwrite=false (versioned saves)")
+        raise ValueError("Use dbat_preprocessing_v4 and output.overwrite=false (versioned saves)")
     try:
         filename = output["filename"].format(recording_id="Sub1_M1")
     except (KeyError, ValueError) as error:

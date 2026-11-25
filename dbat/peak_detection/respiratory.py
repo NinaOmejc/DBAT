@@ -500,7 +500,7 @@ def detect_preprocessed(data, settings=None):
     ----------
     data : PreprocessedRecording or dict
         Existing in-memory result, or load_preprocessing_result output. Uses
-        only signals/smoothed, processed_fs_hz and processed-grid QC masks.
+        only preproc_signal (or legacy signals/smoothed), processed_fs_hz and QC masks.
     settings : DetectorSettings, optional
         Respiratory detector settings; no preprocessing operation is performed.
 
@@ -511,13 +511,19 @@ def detect_preprocessed(data, settings=None):
         per-channel belt landmarks. Missing belt columns are simply absent.
     """
     if isinstance(data, dict):
-        if data["respiratory_analysis_source"] != "signals/smoothed":
-            raise ValueError("Respiratory detection requires signals/smoothed")
-        values, fs = data["signals"]["smoothed"], data["processed_fs_hz"]
+        source = data["respiratory_analysis_source"]
+        if source == "preproc_signal":
+            values = data["preproc_signal"]
+        elif source == "signals/smoothed":
+            values = data["signals"]["smoothed"]
+        else:
+            raise ValueError("Respiratory detection requires the final preprocessed signal")
+        fs = data["processed_fs_hz"]
         time, channels, masks = data["processed_time_sec"], data["channels"], data["masks"]
         metadata = data["metadata"]
         identity, provenance, qc = metadata["identity"], metadata["processing"], metadata["qc"]
     else:
+        source = data.provenance.get("respiratory_analysis_source", "signals/smoothed")
         values, fs = data.respiratory_signal, data.processed_fs_hz
         time, channels, masks = data.processed_time_sec, data.recording.channels, data.masks
         identity = recording_identity(data.recording)
@@ -540,7 +546,7 @@ def detect_preprocessed(data, settings=None):
         "identity": copy.deepcopy(identity),
         "fs_hz": float(fs),
         "time_sec": time.copy(),
-        "source": "signals/smoothed",
+        "source": source,
         "preprocessing": copy.deepcopy(
             {
                 key: provenance[key]
@@ -562,7 +568,7 @@ def detect_preprocessed(data, settings=None):
             valid=masks["valid"][:, column],
             artifact=masks["artifact"][:, column],
             interpolated=masks["interpolated"][:, column],
-            source=f"signals/smoothed[{column}]",
+            source=f"{source}[{column}]",
             channel_status=qc["channel_ratings"][name],
         )
     if not result["belts"]:

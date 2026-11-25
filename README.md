@@ -112,7 +112,7 @@ lungs = landmarks["belts"]["Resp-Lungs"]
 ```
 
 The same function accepts an in-memory `PreprocessedRecording`. It reads only the
-saved `smoothed` waveform, `processed_fs_hz` and processed-grid masks; it never
+saved `preproc_signal` waveform, `processed_fs_hz` and processed-grid masks; it never
 smooths again or assumes 200 Hz after resampling. Peaks/troughs remain zero-based
 on that exact grid. Finite landmarks remain numerical evidence even on unreviewed
 or artifact-invalid support; analytical breath/IBI masks and reasons remain false
@@ -177,7 +177,10 @@ descending numeric order. Source identity/SHA-256, native and processed grids,
 channel order, schema, processing versions/settings, selected QC channels and QC
 annotations must match. Incompatible runs are logged and partial writes are
 ignored. Cache hits leave existing outputs unchanged and skip the QC GUI.
-Set `reuse_preproc = false` to preprocess and save a new versioned run instead.
+Set `reuse_preproc = false` to save a new run while still reusing accepted QC.
+Set `qc.review_again = true` with `qc.open_gui = true` to bypass the cache and
+explicitly reopen accepted QC for editing. Changes to numerical settings create a
+new run without requiring another review when QC remains compatible.
 New results receive the checker's existing round-trip checks.
 
 `run.verbosity` controls all DBAT console progress through the shared `dbat` logger:
@@ -209,13 +212,15 @@ Configured filenames are resolved for each pair. To inspect an explicitly named
 `.dat`, set `input.dat_file` and select exactly one subject and one measurement;
 identity, filename fs and column layout are still validated. Whenever processing
 is needed, the latest source-compatible accepted QC is loaded automatically from
-the recording's `qc/` folder; if none exists, annotations start unreviewed.
+completed or pending run folders, with legacy `qc/` folders also searched.
+If none exists, annotations start unreviewed. Acceptance time determines the newest
+compatible review; copying QC to another run does not renew its acceptance.
 `qc.open_gui` still controls review before processing. Optional explicit paths
 override automatic QC selection:
 
 ```toml
 [qc.annotation_files]
-Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"
+Sub1_M1 = "../outputs/preproc_data/Sub1_M1/run0/qc.json"
 ```
 
 Paths are relative to the TOML file unless absolute. QC files can also be a previous
@@ -282,7 +287,7 @@ timestamps are saved separately from the manual QC evidence.
 
 - `qc.channels` defaults to `["Resp-Lungs", "Resp-Diaphragm", "SpO2"]`, in that
   display order. Change this list to review other channels. All six native channels
-  remain stored on their original shared time grid. Slider, Previous/Next and zoom buttons move
+  remain available on the native source grid during QC; final outputs use the processed grid. Slider, Previous/Next and zoom buttons move
   a viewport. The length box uses the configured unit: `600` samples is **3 s** at
   200 Hz; `600` seconds is **120000 samples**. Drawing alone may be thinned.
 - The GUI opens maximized to the current monitor's available screen area on the
@@ -330,21 +335,23 @@ timestamps are saved separately from the manual QC evidence.
 
 ## Signal hierarchy and the single respiratory input
 
-New results use schema **`dbat_preprocessing_v3`** and exactly three canonical
-matrices. Original remains native; preprocessed and smoothed share the explicit
-processed grid, which is native by default:
+New results use schema **`dbat_preprocessing_v4`** and one root signal dataset:
 
 | HDF5 dataset | Python result | Meaning |
 |---|---|---|
-| `signals/original` | `result.original` | Immutable supplied `.dat` samples |
-| `signals/preprocessed` | `result.preprocessed` | Automatic interpolation, accepted polarity, native detrending/filtering and optional primary resampling |
-| `signals/smoothed` | `result.smoothed` | Preprocessed values plus one configured respiratory smoothing pass |
+| `preproc_signal` | `result.preproc_signal` | Final artifact-corrected, polarity-adjusted, optionally detrended/filtered/resampled and once-smoothed signal |
+
+Original and intermediate signal arrays are not saved. The source `.dat` stays
+unchanged and is identified by path/hash and its native rate/time axis. In-memory
+`result.smoothed` remains an alias of the final array for existing callers;
+`result.preprocessed` is available after computation but is `None` when reloading
+a new cached run, because that intermediate is no longer stored.
 
 `prepared["corrected"]` remains a temporary, source-oriented input for initial
 technical QC and polarity assessment; it is not saved as a fourth canonical signal.
 The GUI still runs before optional detrending and respiratory smoothing.
 
-**All future respiratory analysis starts from `result.smoothed`.**
+**All future respiratory analysis starts from `result.preproc_signal`.**
 `result.respiratory_signal` is a direct alias for that same array, with no copy,
 selection logic or extra smoothing. Use its relevant belt columns for peak/trough
 detection and editing, amplitudes/IBIs, session references and excursion statistics,
@@ -463,8 +470,9 @@ skip it. Native correction, polarity, detrending and optional filtering happen
 first. Then [SciPy `resample_poly`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.resample_poly.html)
 with a symmetric Kaiser FIR resamples **preprocessed once**, for all six channels.
 Finally the respiratory smoother runs **once at the processed rate**. Thus
-`signals/preprocessed` and `signals/smoothed` are the primary target-grid outputs;
-there is no second `resampled/` bundle. Original remains on its untouched native grid.
+`preproc_signal` is the final target-grid output; neither intermediate/native
+signal arrays nor a second `resampled/` bundle are stored. Native rate/time and
+source identity/hash remain explicit.
 The anti-alias FIR remains necessary even if optional belt low-pass is enabled.
 
 The FIR uses actual finite values regardless of quality approval. Line endpoint
@@ -485,53 +493,66 @@ historical MATLAB landmark import remains unimplemented.
 
 ## Outputs and manual verification
 
-Every run uses a new `outputs/preproc_data/SubN_MM/run0/`, then `run1/`,
-`run2/`, etc., directly inside the recording folder. Numbering starts at zero and
-continues above the highest existing or reserved run number. Previous timestamped
-outputs remain untouched; no extra `runs/` layer is created for new results.
-Accepted QC also has a separately versioned JSON under
-`outputs/preproc_data/SubN_MM/qc/`, discovered automatically unless
-`qc.annotation_files` supplies an override; no previous result, accepted review,
-`.dat`, MATLAB `.mat` or HDF5 is replaced.
-A failure during writing leaves `.runN.partial` rather than a published run,
-reserving that number so the next save cannot overwrite incomplete work.
+Every new output lives directly under the recording folder:
 
-`SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v3`**:
+```text
+Sub21_M1/
+  run0/
+    Sub21_M1_preprocessing.h5
+    qc.json
+    summary.json
+    preview.png                 # When enabled
+  run1/
+    ...
+```
 
-- `/signals/original`: unchanged native values; `/original_time_sec` and the
-  `original_fs_hz` attribute define its grid.
-- `/signals/{preprocessed,smoothed}`: primary processed values;
-  `/processed_time_sec` and `processed_fs_hz` define their common grid.
-- Each signal dataset also identifies its own sampling rate and time-axis path.
-- `/masks/*`: Boolean masks on the processed grid. `valid` belongs to smoothed;
-  `preprocessed_valid` describes the intermediate stage. Original manual QC
-  intervals stay native in metadata. Coverage/artifact durations in the channel
-  summary use native manual evidence; numerical mask counts/valid fractions use
-  the processed grid.
-- `/channels`, `/metadata_json`: source identity/hash, both grids, config, QC,
-  algorithm versions, analysis-source contract, actual filters, interpolation
-  dependence and skip reasons. No `/resampled/` bundle is written.
+Run numbers are reserved with atomic directory creation; completed and pending
+numbers are never reused. Immediately after GUI acceptance, exact QC is flushed
+to `.runN.partial/qc.json` **before numerical preprocessing**. Processing or preview
+failure leaves this recoverable directory in place. QC discovery includes pending
+runs, so a retry can reuse the accepted annotations and creates a new run number.
+A successful write publishes the pending directory as `runN`. Each completed run
+contains exact matching QC in `qc.json`, HDF5 metadata and `summary.json`.
+Reused decisions retain their original reviewer/acceptance timestamp. Headless
+unreviewed runs also store `qc.json`, explicitly without acceptance or invented review.
 
-`summary.json` mirrors the metadata. Optional `preview.png` compares all three
-representations on their declared time axes. The existing checker verifies exact
-HDF5/JSON round trips, both zero-origin grids, unchanged original/checksum,
-processed-grid masks and genuine numerical availability. `validation.json` is
-written only after these checks pass; this is not a clinical or MATLAB-equivalence
-validation.
+QC overrides accept `qc.json`, legacy timestamp QC JSON, or any supported summary
+JSON. Automatic discovery validates identity, source hash and native sampling grid.
+Legacy `qc/`, timestamp `runs/` and earlier outputs are neither migrated nor deleted.
+Cache hits require matching source/grids/settings/algorithms/QC and, for v4, matching
+run-local `qc.json`; pending runs are never reused as completed preprocessing.
+
+`SubN_MM_preprocessing.h5` uses **`dbat_preprocessing_v4`**:
+
+- `/preproc_signal`: the only saved signal array, on the processed grid.
+- `/original_time_sec`, `/processed_time_sec`, `original_fs_hz` and
+  `processed_fs_hz`: both explicit grids; the final dataset also declares its rate
+  and time-axis path. Native QC interval coordinates remain unchanged.
+- `/masks/*`: all existing QC, finite, support, eligibility, validity and
+  interpolation masks on the processed grid, including intermediate-stage masks.
+- `/channels`, `/metadata_json`: full source identity/hash, config/settings,
+  algorithms, diagnostics and QC. The authoritative analysis source is `preproc_signal`.
+
+`summary.json` mirrors HDF5 metadata. Optional `preview.png` displays the final
+waveform. The checker compares the signal, all masks, rates/time axes and exact
+run-local QC; it checks the source checksum without saving another source copy.
 
 ```python
 from dbat.io.recording import load_preprocessing_result
 
-saved = load_preprocessing_result(h5_path)  # The .h5 file, not its run directory.
-respiratory_signal = saved["signals"]["smoothed"]
-fs_hz = saved["processed_fs_hz"]  # Use for subsequent respiratory detection.
+saved = load_preprocessing_result(h5_path)
+respiratory_signal = saved["preproc_signal"]
+fs_hz = saved["processed_fs_hz"]
 time_sec = saved["processed_time_sec"]
 valid = saved["masks"]["valid"]
 ```
 
-Only the current schema is read. No older DBAT compatibility, aliases or migration
-are provided during development; existing outputs remain untouched. New runs use
-v3. Native `.dat` input and source-compatible standalone QC JSON remain supported.
+The reader also accepts **v1, v2 and v3**. Their actual stored arrays remain
+available through `signals` (and `resampled` where present); `preproc_signal`
+references their final native waveform. Metadata and mask values are preserved.
+No missing original/intermediate arrays are fabricated for v4 files. A v4 cache
+request recomputes an older-schema run into a new immutable run rather than
+modifying it. Native `.dat` loading remains unchanged.
 
 Inspect the most recent output after a successful run:
 

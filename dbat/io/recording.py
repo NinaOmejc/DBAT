@@ -3,17 +3,18 @@
 import hashlib
 import importlib.metadata
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
+from datetime import datetime
 
 import h5py
 import numpy as np
 
 from .. import __version__
-from ..config import RESULT_SCHEMA
+from ..config import READABLE_RESULT_SCHEMAS, RESULT_SCHEMA
 from ..logging import logger
 from ..preprocessing.annotations import (
     annotation_masks,
@@ -160,24 +161,62 @@ def _output_root(recording, output_dir):
     return root / recording.recording_id
 
 
-def _version_name():
-    """Create a portable UTC version name with a collision-resistant suffix."""
-    return utc_now().replace(":", "").replace("+0000", "Z") + "_" + uuid4().hex[:8]
+def reserve_preprocessing_run(recording, output_dir):
+    """Atomically reserve a new .runN.partial directory without reusing a number."""
+    root = _output_root(recording, output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    number = 0
+    for path in root.iterdir():
+        match = re.fullmatch(r"\.?run(\d+)(?:\.partial)?", path.name)
+        if match:
+            number = max(number, int(match[1]) + 1)
+    while True:
+        pending = root / f".run{number}.partial"
+        try:
+            pending.mkdir()
+        except FileExistsError:
+            number += 1
+            continue
+        if not (root / f"run{number}").exists():
+            return pending
+        pending.rmdir()  # Only this call's empty reservation.
+        number += 1
 
 
-def save_qc_annotations(qc, recording, output_dir):
-    """Commit accepted QC to a new JSON version before any conditioning runs."""
+def _write_run_qc(qc, recording, output_dir, run_dir):
+    """Write QC atomically in its reserved run, or require an exact existing copy."""
+    folder = Path(run_dir).resolve(strict=True)
+    if folder.parent != _output_root(recording, output_dir) or not re.fullmatch(
+        r"\.run[0-9]+\.partial", folder.name
+    ):
+        raise ValueError("QC must be written in a reserved pending run for this recording")
+    path = folder / "qc.json"
+    if path.exists():
+        with path.open(encoding="utf-8") as stream:
+            if json.load(stream) != qc:
+                raise ValueError("Pending run contains different accepted QC; reserve a new run")
+        return path
+    temporary = folder / "qc.json.partial"
+    with temporary.open("x", encoding="utf-8") as stream:
+        json.dump(qc, stream, indent=2, ensure_ascii=False, allow_nan=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.rename(path)
+    return path
+
+
+def save_qc_annotations(qc, recording, output_dir, *, run_dir=None):
+    """Preserve accepted QC immediately in a recoverable pending run's qc.json.
+
+    Returns the QC path; pass its parent to save_preprocessing_result(run_dir=...).
+    Reused QC keeps its original decisions, reviewer and acceptance timestamp.
+    """
     validate_qc_annotations(qc, recording)
     if qc["accepted_at_utc"] is None:
         raise ValueError("Only explicitly accepted QC can be saved as a review")
     logger.info("  Saving QC for %s...", recording.recording_id)
-    folder = _output_root(recording, output_dir) / "qc"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{_version_name()}.json"
-    temporary = path.with_suffix(".partial")
-    with temporary.open("x", encoding="utf-8") as stream:
-        json.dump(qc, stream, indent=2, ensure_ascii=False, allow_nan=False)
-    temporary.rename(path)
+    folder = reserve_preprocessing_run(recording, output_dir) if run_dir is None else run_dir
+    path = _write_run_qc(qc, recording, output_dir, folder)
     logger.debug("Accepted QC saved: %s", path)
     return path
 
@@ -191,7 +230,7 @@ def load_qc_annotations(path, recording):
         document = json.load(stream)
     if not isinstance(document, dict):
         raise ValueError("QC JSON must contain an object")
-    qc = document["qc"] if document.get("schema_version") == RESULT_SCHEMA else document
+    qc = document["qc"] if document.get("schema_version") in READABLE_RESULT_SCHEMAS else document
     if not isinstance(qc, dict):
         raise ValueError("QC annotations must contain an object")
     validate_qc_annotations(qc, recording)
@@ -200,26 +239,36 @@ def load_qc_annotations(path, recording):
 
 
 def load_latest_qc_annotations(recording, config):
-    """Load an explicit QC override or the newest source-compatible accepted QC.
+    """Find the newest compatible accepted review in runs, pending runs or legacy qc/.
 
-    Automatic discovery uses saved UTC filenames in the recording's qc folder.
-    Rejected files are logged; absent accepted QC returns unreviewed annotations.
-    Explicit overrides retain load_qc_annotations' strict error behavior.
+    Explicit overrides fail strictly. Discovery validates native identity/hash/grid
+    and orders accepted reviews by acceptance time, then saved-file time. Pending
+    QC remains discoverable after interrupted processing; results are never moved.
     """
     override = config["qc"].get("annotation_files", {}).get(recording.recording_id)
     if override:
         return load_qc_annotations(override, recording)
-    folder = _output_root(recording, config["paths"]["output_dir"]) / "qc"
-    for path in sorted(folder.glob("*.json"), reverse=True):
+    root = _output_root(recording, config["paths"]["output_dir"])
+    paths = list((root / "qc").glob("*.json"))
+    for folder in root.iterdir() if root.exists() else ():
+        if folder.is_dir() and re.fullmatch(r"\.?run[0-9]+(?:\.partial)?", folder.name):
+            paths.extend(folder.glob("qc.json"))
+    latest, latest_key = None, None
+    for path in paths:
         try:
             qc = load_qc_annotations(path, recording)
             if not qc["accepted_at_utc"]:
-                raise ValueError("QC has not been accepted")
+                continue
+            accepted = datetime.fromisoformat(qc["accepted_at_utc"].replace("Z", "+00:00"))
+            if accepted.tzinfo is None:
+                raise ValueError("Acceptance timestamp must include its time zone")
+            key = (accepted.timestamp(), path.stat().st_mtime_ns, str(path))
         except (OSError, ValueError, KeyError, TypeError) as error:
             logger.warning("  Skipping QC %s: %s", path, error)
             continue
-        return qc
-    return new_qc_annotations(recording, config["qc"]["reviewer"])
+        if latest_key is None or key > latest_key:
+            latest, latest_key = qc, key
+    return latest if latest is not None else new_qc_annotations(recording, config["qc"]["reviewer"])
 
 
 def load_reusable_preprocessing_result(recording, config, qc):
@@ -235,15 +284,22 @@ def load_reusable_preprocessing_result(recording, config, qc):
     from ..preprocessing.cleaning import ALGORITHM_VERSION
 
     validate_qc_annotations(qc, recording)
-    settings = {key: value for key, value in config["preprocessing"].items() if key != "reuse_preproc"}
+    settings = {
+        key: value for key, value in config["preprocessing"].items() if key != "reuse_preproc"
+    }
     ignored_qc = {"loaded_from_file"}
     if not qc["accepted_at_utc"]:
         ignored_qc.update(("created_at_utc", "reviewer"))
     expected_qc = {key: value for key, value in qc.items() if key not in ignored_qc}
     root = _output_root(recording, config["paths"]["output_dir"])
     folders = sorted(
-        (path for path in root.glob("run*") if path.is_dir() and re.fullmatch(r"run[0-9]+", path.name)),
-        key=lambda path: int(path.name[3:]), reverse=True,
+        (
+            path
+            for path in root.glob("run*")
+            if path.is_dir() and re.fullmatch(r"run[0-9]+", path.name)
+        ),
+        key=lambda path: int(path.name[3:]),
+        reverse=True,
     )
     for folder in folders:
         try:
@@ -252,6 +308,10 @@ def load_reusable_preprocessing_result(recording, config, qc):
                 raise ValueError("run is incomplete or has ambiguous HDF5 results")
             saved = load_preprocessing_result(paths[0])
             metadata = saved["metadata"]
+            if saved["schema_version"] == RESULT_SCHEMA:
+                with (folder / "qc.json").open(encoding="utf-8") as stream:
+                    if json.load(stream) != metadata["qc"]:
+                        raise ValueError("Run QC and HDF5 metadata disagree")
             with (folder / "summary.json").open(encoding="utf-8") as stream:
                 if json.load(stream) != metadata:
                     raise ValueError("HDF5 metadata and summary disagree")
@@ -263,12 +323,16 @@ def load_reusable_preprocessing_result(recording, config, qc):
                 or recording.fs_hz != config["input"]["fs_hz"]
                 or list(recording.channels) != config["input"]["channels"]
             ):
-                raise ValueError("source identity/hash, native sampling rate or channel order changed")
+                raise ValueError(
+                    "source identity/hash, native sampling rate or channel order changed"
+                )
             previous = metadata["config"]
             if not isinstance(previous["preprocessing"], dict):
                 raise ValueError("saved preprocessing settings must be an object")
             previous_settings = {
-                key: value for key, value in previous["preprocessing"].items() if key != "reuse_preproc"
+                key: value
+                for key, value in previous["preprocessing"].items()
+                if key != "reuse_preproc"
             }
             processing = metadata["processing"]
             if (
@@ -278,17 +342,24 @@ def load_reusable_preprocessing_result(recording, config, qc):
                 or processing["algorithm_version"] != PREPROCESSING_ALGORITHM
                 or processing["automatic_cleaning"]["algorithm_version"] != ALGORITHM_VERSION
             ):
-                raise ValueError("preprocessing settings, QC channel selection or algorithms changed")
+                raise ValueError(
+                    "preprocessing settings, QC channel selection or algorithms changed"
+                )
             saved_qc = metadata["qc"]
             if not isinstance(saved_qc, dict):
                 raise ValueError("saved QC annotations must be an object")
             validate_qc_annotations(saved_qc, recording)
-            if {key: value for key, value in saved_qc.items() if key not in ignored_qc} != expected_qc:
-                raise ValueError("saved QC differs from the latest accepted QC or explicit override")
+            if {
+                key: value for key, value in saved_qc.items() if key not in ignored_qc
+            } != expected_qc:
+                raise ValueError(
+                    "saved QC differs from the latest accepted QC or explicit override"
+                )
             decision = saved_qc.get("polarity")
-            if (
-                processing["polarity"]["decision"] != decision
-                or (decision and decision["preparation_signature"] != processing["automatic_cleaning"]["signature"])
+            if processing["polarity"]["decision"] != decision or (
+                decision
+                and decision["preparation_signature"]
+                != processing["automatic_cleaning"]["signature"]
             ):
                 raise ValueError("saved polarity decision is incompatible with automatic cleaning")
             target_fs = settings["resampling"]["resample_freq"] or recording.fs_hz
@@ -313,17 +384,30 @@ def load_reusable_preprocessing_result(recording, config, qc):
                 raise ValueError("saved grid metadata disagrees with the source/processed grid")
             shape = (count, len(recording.channels))
             if (
-                not np.array_equal(saved["signals"]["original"], recording.samples, equal_nan=True)
-                or not np.array_equal(saved["original_time_sec"], recording.time_sec)
-                or not np.array_equal(saved["processed_time_sec"], np.arange(count) / saved["processed_fs_hz"])
-                or any(saved["signals"][name].shape != shape for name in ("preprocessed", "smoothed"))
+                not np.array_equal(saved["original_time_sec"], recording.time_sec)
+                or not np.array_equal(
+                    saved["processed_time_sec"], np.arange(count) / saved["processed_fs_hz"]
+                )
+                or saved["preproc_signal"].shape != shape
             ):
-                raise ValueError("saved signals or time grids do not match the source/processed grid")
+                raise ValueError(
+                    "saved signals or time grids do not match the source/processed grid"
+                )
             required_masks = {
-                "artifact", "reviewed", "interpolated", "auto_candidate", "finite",
-                "quality_selected", "uncertain", "eligible", "preprocessed_support",
-                "preprocessed_interpolated", "preprocessed_valid", "smoothed_support",
-                "smoothed_interpolated", "valid",
+                "artifact",
+                "reviewed",
+                "interpolated",
+                "auto_candidate",
+                "finite",
+                "quality_selected",
+                "uncertain",
+                "eligible",
+                "preprocessed_support",
+                "preprocessed_interpolated",
+                "preprocessed_valid",
+                "smoothed_support",
+                "smoothed_interpolated",
+                "valid",
             }
             if rate["applied"]:
                 required_masks.update(("boundary", "missing_influence"))
@@ -340,33 +424,74 @@ def load_reusable_preprocessing_result(recording, config, qc):
 
 
 def load_preprocessing_result(path):
-    """Read current signals, explicit original/processed grids, masks and metadata.
+    """Read the final signal and metadata from v4 or earlier DBAT HDF5 schemas.
 
-    Original retains its native grid. Preprocessed, smoothed and all masks use
-    processed_time_sec/processed_fs_hz. Older schemas are unsupported; no migration.
+    v4 contains preproc_signal only. Earlier stored arrays remain available in
+    signals (and resampled where present), without changing or migrating files.
+    preproc_signal always identifies the final waveform on the returned processed
+    grid; metadata and all original saved arrays/masks are preserved.
     """
     path = Path(path).resolve(strict=True)
     if not path.is_file():
         raise ValueError(f"Expected a DBAT HDF5 file, not a directory: {path}")
     with h5py.File(path, "r") as handle:
-        if handle.attrs["schema_version"] != RESULT_SCHEMA:
-            raise ValueError(f"Only {RESULT_SCHEMA} results are supported")
+        schema = handle.attrs["schema_version"]
+        if schema not in READABLE_RESULT_SCHEMAS:
+            raise ValueError(f"Unsupported DBAT result schema: {schema}")
         metadata = json.loads(handle["metadata_json"].asstr()[()])
-        if metadata["schema_version"] != RESULT_SCHEMA:
+        if metadata["schema_version"] != schema:
             raise ValueError("HDF5 and embedded metadata schemas disagree")
         result = {
-            "schema_version": RESULT_SCHEMA,
-            "signals": {name: handle[f"signals/{name}"][:] for name in ("original", "preprocessed", "smoothed")},
-            "respiratory_analysis_source": "signals/smoothed",
-            "original_time_sec": handle["original_time_sec"][:],
-            "processed_time_sec": handle["processed_time_sec"][:],
-            "original_fs_hz": float(handle.attrs["original_fs_hz"]),
-            "processed_fs_hz": float(handle.attrs["processed_fs_hz"]),
+            "schema_version": schema,
+            "metadata": metadata,
             "channels": handle["channels"].asstr()[:].tolist(),
             "masks": {name: dataset[:] for name, dataset in handle["masks"].items()},
-            "metadata": metadata,
         }
-        result["signals"]["original"].setflags(write=False)
+        if schema in {"dbat_preprocessing_v3", RESULT_SCHEMA}:
+            result.update(
+                original_time_sec=handle["original_time_sec"][:],
+                processed_time_sec=handle["processed_time_sec"][:],
+                original_fs_hz=float(handle.attrs["original_fs_hz"]),
+                processed_fs_hz=float(handle.attrs["processed_fs_hz"]),
+            )
+        else:
+            result.update(
+                original_time_sec=handle["time_sec"][:],
+                processed_time_sec=handle["time_sec"][:],
+                original_fs_hz=float(handle.attrs["fs_hz"]),
+                processed_fs_hz=float(handle.attrs["fs_hz"]),
+            )
+        if schema == RESULT_SCHEMA:
+            result["preproc_signal"] = handle["preproc_signal"][:]
+            result["respiratory_analysis_source"] = "preproc_signal"
+        else:
+            if schema == "dbat_preprocessing_v1":
+                signals = {
+                    "original": handle["source/samples"][:],
+                    "preprocessed": handle["derived/conditioned"][:],
+                    "smoothed": handle["derived/respiratory_view"][:],
+                }
+                if "derived/corrected" in handle:
+                    signals["corrected"] = handle["derived/corrected"][:]
+            else:
+                signals = {name: dataset[:] for name, dataset in handle["signals"].items()}
+            signals["original"].setflags(write=False)
+            result["signals"] = signals
+            result["preproc_signal"] = signals["smoothed"]
+            result["respiratory_analysis_source"] = "signals/smoothed"
+            if "resampled" in handle:
+                group = handle["resampled"]
+                names = (
+                    {"preprocessed": "conditioned", "smoothed": "respiratory_view"}
+                    if schema == "dbat_preprocessing_v1"
+                    else {"preprocessed": "signals/preprocessed", "smoothed": "signals/smoothed"}
+                )
+                result["resampled"] = {
+                    "signals": {name: group[key][:] for name, key in names.items()},
+                    "time_sec": group["time_sec"][:],
+                    "fs_hz": float(group.attrs["fs_hz"]),
+                    "masks": {name: dataset[:] for name, dataset in group["masks"].items()},
+                }
     return result
 
 
@@ -379,15 +504,13 @@ def result_metadata(result, config):
         "created_at_utc": utc_now(),
         "dbat_version": __version__,
         "signal_definitions": {
-            "signals/original": "Immutable supplied .dat values",
-            "signals/preprocessed": "Automatic interpolation, accepted polarity, optional native detrending/filtering and primary resampling",
-            "signals/smoothed": "Preprocessed plus one respiratory smoothing pass; sole respiratory-analysis source",
+            "preproc_signal": "Final corrected, polarity-adjusted, optionally detrended/filtered/resampled and once-smoothed signal",
         },
-        "respiratory_analysis_source": "signals/smoothed",
+        "respiratory_analysis_source": "preproc_signal",
         "original_grid": {"fs_hz": result.original_fs_hz, "time_axis": "original_time_sec",
                           "n_samples": len(result.original), "mask_basis": "Native QC intervals in qc"},
         "processed_grid": {"fs_hz": result.processed_fs_hz, "time_axis": "processed_time_sec",
-                           "n_samples": len(result.preprocessed), "mask_basis": "All masks/*"},
+                           "n_samples": len(result.preproc_signal), "mask_basis": "All masks/*"},
         "channel_summary_basis": "Manual coverage/artifact durations use native QC; mask counts/valid fractions use the processed grid",
         "import_validation": "passed: numeric matrix, identity, channels and configured sampling rate",
         "identity": recording_identity(recording),
@@ -433,13 +556,12 @@ def result_metadata(result, config):
     }
 
 
-def save_preprocessing_result(result, config):
-    """Atomically publish a new run directory containing HDF5, JSON and preview.
+def save_preprocessing_result(result, config, *, run_dir=None):
+    """Publish a new immutable run with final HDF5, exact qc.json and summary.
 
-    Existing runs and source files are never overwritten. Accepted QC is stored
-    independently by the caller first, so a later processing failure cannot lose it.
-    Returns the final HDF5 path under run0, run1, etc. directly in the recording
-    folder. Incomplete writes reserve their number in a .runN.partial directory.
+    Pass the pending directory from save_qc_annotations to retain accepted QC on
+    processing/write failure. Direct callers reserve a run here; unreviewed QC is
+    stored as explicitly unaccepted. Failed writes remain recoverable in place.
     """
     if config["output"]["schema_version"] != RESULT_SCHEMA:
         raise ValueError(f"New results must use {RESULT_SCHEMA}")
@@ -447,24 +569,9 @@ def save_preprocessing_result(result, config):
     validate_qc_annotations(result.qc, recording)
     logger.info("  Saving preprocessing result for %s...", recording.recording_id)
     root = _output_root(recording, config["paths"]["output_dir"])
-    root.mkdir(parents=True, exist_ok=True)
-    number = 0
-    for path in root.iterdir():
-        match = re.fullmatch(r"\.?run(\d+)(?:\.partial)?", path.name)
-        if match:
-            number = max(number, int(match[1]) + 1)
-    while True:
-        version = f"run{number}"
-        temporary = root / f".{version}.partial"
-        try:
-            temporary.mkdir()
-        except FileExistsError:
-            number += 1
-            continue
-        if not (root / version).exists():
-            break
-        temporary.rmdir()
-        number += 1
+    temporary = reserve_preprocessing_run(recording, config["paths"]["output_dir"]) if run_dir is None else Path(run_dir)
+    _write_run_qc(result.qc, recording, config["paths"]["output_dir"], temporary)
+    version = temporary.name.removeprefix(".").removesuffix(".partial")
     filename = config["output"]["filename"].format(recording_id=recording.recording_id)
     metadata = result_metadata(result, config)
     with h5py.File(temporary / filename, "x") as handle:
@@ -477,19 +584,14 @@ def save_preprocessing_result(result, config):
         handle.attrs["sample_intervals"] = "zero-based half-open [start,end)"
         handle.create_dataset("channels", data=list(recording.channels), dtype=h5py.string_dtype())
         for name, values in {
-            "signals/original": result.original,
-            "signals/preprocessed": result.preprocessed,
-            "signals/smoothed": result.smoothed,
+            "preproc_signal": result.preproc_signal,
             "original_time_sec": result.original_time_sec,
             "processed_time_sec": result.processed_time_sec,
             **{f"masks/{name}": mask for name, mask in result.masks.items()},
         }.items():
             handle.create_dataset(name, data=values, compression="gzip", shuffle=True)
-        for name in ("original", "preprocessed", "smoothed"):
-            dataset = handle[f"signals/{name}"]
-            original = name == "original"
-            dataset.attrs["fs_hz"] = result.original_fs_hz if original else result.processed_fs_hz
-            dataset.attrs["time_axis"] = "original_time_sec" if original else "processed_time_sec"
+        handle["preproc_signal"].attrs["fs_hz"] = result.processed_fs_hz
+        handle["preproc_signal"].attrs["time_axis"] = "processed_time_sec"
         handle.create_dataset(
             "metadata_json",
             data=json.dumps(metadata, ensure_ascii=False, allow_nan=False),
@@ -533,8 +635,6 @@ def save_preview(result, config, path):
         recording.samples.shape[0],
         start + max(2, int(config["output"]["preview_duration_sec"] * recording.fs_hz)),
     )
-    step = max(1, int(np.ceil((end - start) / config["qc"]["max_plot_points"])))
-    indices = np.arange(start, end, step)
     first, last = np.searchsorted(result.processed_time_sec, [start / recording.fs_hz, end / recording.fs_hz])
     stride = max(1, int(np.ceil((last - first) / config["qc"]["max_plot_points"])))
     processed_indices = np.arange(first, last, stride)
@@ -545,23 +645,8 @@ def save_preview(result, config, path):
     for axis, name in zip(axes, channels, strict=True):
         column = recording.channels.index(name)
         axis.plot(
-            recording.time_sec[indices],
-            recording.samples[indices, column],
-            color="0.65",
-            lw=0.7,
-            label="Original",
-        )
-        axis.plot(
-            result.processed_time_sec[processed_indices],
-            result.preprocessed[processed_indices, column],
-            lw=0.7,
-            label="Preprocessed",
-        )
-        axis.plot(
-            result.processed_time_sec[processed_indices],
-            result.smoothed[processed_indices, column],
-            lw=0.8,
-            label="Smoothed (respiratory source)",
+            result.processed_time_sec[processed_indices], result.preproc_signal[processed_indices, column],
+            lw=0.8, label="Final preprocessed signal",
         )
         for key, color in (("interpolated", "teal"), ("auto_candidate", "orange")):
             for begin, finish in continuous_runs(result.masks[key][first:last, column]):
@@ -620,9 +705,9 @@ def preprocessing_provenance(result, config, prepared, decision):
         "edge_policy": "Moving mean shrinks at recording ends with valid numerical support; genuine gap/artifact influence stays unsupported. Optional IIR filters cross QC/artifact flags; reflection guards at recording ends or genuine missing gaps remain unsupported.",
         "signal_policy": "Numerical conditioning is independent of channel ratings, QC channel selection and reviewed coverage",
         "processing_skips": processing_skips,
-        "respiratory_analysis_source": "signals/smoothed",
+        "respiratory_analysis_source": "preproc_signal",
         "respiratory_analysis_fs_hz": processed_fs,
-        "respiratory_analysis_policy": "Every future respiratory detector/analysis uses smoothed, processed_fs_hz and valid/interpolated masks; no second general smoothing pass",
+        "respiratory_analysis_policy": "Every future respiratory detector/analysis uses preproc_signal, processed_fs_hz and valid/interpolated masks; no second general smoothing pass",
         "native_landmark_indices_compatible": processed_fs == recording.fs_hz
         and np.array_equal(times, recording.time_sec),
         "native_landmark_policy": "Require exact native-grid equality before direct historical MATLAB index reuse; otherwise reject direct reuse",

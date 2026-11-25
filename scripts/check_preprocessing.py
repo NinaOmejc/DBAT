@@ -348,16 +348,17 @@ def check_pipeline_storage(recording, config, prepared):
     assert np.isnan(resampled[0][:, 4]).all() and resampled[1]["missing_influence"].any()
     first = save_preprocessing_result(reviewed, config)
     verify_saved_result(first, reviewed)
-    assert first.parent.name == "run0" and (first.parent / "preview.png").is_file()
+    assert first.parent.name.startswith("run") and (first.parent / "preview.png").is_file()
     loaded = load_preprocessing_result(first)
-    np.testing.assert_array_equal(loaded["signals"]["smoothed"], reviewed.smoothed)
+    np.testing.assert_array_equal(loaded["preproc_signal"], reviewed.preproc_signal)
     config = deepcopy(config)
     config["output"]["save_preview"] = False
     second = save_preprocessing_result(reviewed, config)
-    assert second.parent.name == "run1" and not (first.parent.parent / "runs").exists()
-    (first.parent.parent / ".run2.partial").mkdir()
+    number = int(first.parent.name[3:])
+    assert second.parent.name == f"run{number + 1}" and not (first.parent.parent / "runs").exists()
+    (first.parent.parent / f".run{number + 2}.partial").mkdir()
     third = save_preprocessing_result(reviewed, config)
-    assert third.parent.name == "run3" and first.is_file()
+    assert third.parent.name == f"run{number + 3}" and first.is_file()
     with np.testing.assert_raises(ValueError):
         load_preprocessing_result(first.parent)
     disabled = deepcopy(config)
@@ -476,15 +477,13 @@ def check_preprocessing_functions(config):
 
 
 def verify_saved_result(path, result):
-    """Reopen output and check native originals, primary grids, masks and metadata."""
+    """Reopen final output and check both grids, all masks and exact run-local QC."""
     recording = result.recording
     logger.info("  Verifying saved result for %s...", recording.recording_id)
     with (path.parent / "summary.json").open(encoding="utf-8") as stream:
         summary = json.load(stream)
     expected_arrays = {
-        "signals/original": result.original,
-        "signals/preprocessed": result.preprocessed,
-        "signals/smoothed": result.smoothed,
+        "preproc_signal": result.preproc_signal,
         "original_time_sec": result.original_time_sec,
         "processed_time_sec": result.processed_time_sec,
         **{f"masks/{name}": mask for name, mask in result.masks.items()},
@@ -503,13 +502,8 @@ def verify_saved_result(path, result):
             or handle["channels"].asstr()[:].tolist() != list(recording.channels)
         ):
             raise ValueError("Sampling rates or channel order changed during saving")
-        if (
-            set(handle["signals"]) != {"original", "preprocessed", "smoothed"}
-            or "resampled" in handle
-        ):
-            raise ValueError(
-                "Expected exactly three canonical signals and no duplicate resampled bundle"
-            )
+        if "preproc_signal" not in handle or "signals" in handle or "resampled" in handle:
+            raise ValueError("Expected only the final root preproc_signal signal dataset")
         for name, expected in expected_arrays.items():
             saved = handle[name][:]
             if (
@@ -518,20 +512,20 @@ def verify_saved_result(path, result):
                 or not np.array_equal(saved, expected, equal_nan=True)
             ):
                 raise ValueError(f"Round-trip data mismatch: {name}")
-        for name in ("original", "preprocessed", "smoothed"):
-            expected_fs = result.original_fs_hz if name == "original" else result.processed_fs_hz
-            expected_axis = "original_time_sec" if name == "original" else "processed_time_sec"
-            if (
-                handle[f"signals/{name}"].attrs["fs_hz"] != expected_fs
-                or handle[f"signals/{name}"].attrs["time_axis"] != expected_axis
-            ):
-                raise ValueError(f"Signal sampling metadata disagrees: {name}")
+        if (
+            handle["preproc_signal"].attrs["fs_hz"] != result.processed_fs_hz
+            or handle["preproc_signal"].attrs["time_axis"] != "processed_time_sec"
+        ):
+            raise ValueError("Final signal sampling metadata disagrees")
+        with (path.parent / "qc.json").open(encoding="utf-8") as stream:
+            if json.load(stream) != metadata["qc"]:
+                raise ValueError("Run QC and embedded summary disagree")
         if metadata["qc"] != result.qc:
             raise ValueError("Saved QC annotations differ from the accepted input")
         validate_qc_annotations(metadata["qc"], recording)
     if not np.array_equal(result.original, recording.samples, equal_nan=True):
         raise ValueError("Original samples changed")
-    n_samples = len(result.preprocessed)
+    n_samples = len(result.preproc_signal)
     if result.smoothed.shape != (n_samples, len(recording.channels)):
         raise ValueError("Primary processed signal shapes disagree")
     for times, fs_hz, count in (
@@ -552,7 +546,7 @@ def verify_saved_result(path, result):
     else:
         result.require_native_grid()
         available = np.isfinite(result.original)
-    for values in (result.preprocessed, result.smoothed):
+    for values in (result.preproc_signal,):
         if np.any(available & ~np.isfinite(values)) or np.any(~available & np.isfinite(values)):
             raise ValueError("Numerical availability disagrees with genuine source support")
     for name, mask in result.masks.items():
@@ -573,7 +567,7 @@ def verify_saved_result(path, result):
     ):
         raise ValueError("Respiratory analysis must use smoothed and its processed sampling rate")
     for column, name in enumerate(recording.channels):
-        if (
+        if result.preprocessed is not None and (
             name not in BELTS
             or name not in result.provenance["selected_channels"]
             or result.provenance["smoothing"]["method"] == "none"
@@ -591,18 +585,18 @@ def verify_saved_result(path, result):
             {
                 "status": "passed",
                 "checked_at_utc": utc_now(),
-                "schema_version": "dbat_manual_check_v3",
+                "schema_version": "dbat_manual_check_v4",
                 "recording_id": recording.recording_id,
                 "source_sha256": recording.source_sha256,
                 "checks": [
                     "original samples/checksum unchanged",
-                    "three canonical signals; no duplicate resampled bundle",
+                    "one final preproc_signal; no original/intermediate signal arrays",
                     "explicit original and processed sampling rates/time axes",
                     "processed-grid Boolean masks",
                     "numerical availability independent of QC/support masks",
                     "smoothed respiratory source and processed rate",
                     "QC identity/bounds/provenance",
-                    "exact HDF5/JSON round trip",
+                    "exact HDF5/summary/qc.json round trip",
                 ],
             },
             stream,

@@ -21,7 +21,8 @@ alternate_filename_pattern = "ECG1_ECG2_SpO2_RespL_BP_RespD_fs200_Sub{subject}_P
 # Initial manual technical quality control
 [qc]
 channels = ["Resp-Lungs", "Resp-Diaphragm", "SpO2"]  # Channels displayed and assessed in manual QC, in this order; other native channels remain stored.
-open_gui = true  # Open the manual QC editor before conditioning; false adds no new manual review evidence.
+open_gui = true  # Open QC when no accepted review exists; false creates no manual review evidence.
+review_again = false  # Reopen accepted QC explicitly and bypass the preprocessing cache when open_gui is true.
 window_length = 600.0  # Initial visible window length, expressed in window_unit.
 window_unit = "seconds"  # seconds | samples; 600 samples at 200 Hz is 3 seconds.
 display_mode = "corrected_view"  # corrected_view | shared_scale | independent_scale; original modes show source orientation.
@@ -30,10 +31,10 @@ reviewer = "NO"  # Reviewer identifier; may also be entered in the GUI.
 initial_rating = "unassessed"  # Initial channel quality; must stay unassessed until an explicit manual rating.
 max_plot_points = 5000  # Maximum points drawn per channel; annotation indexing always uses native samples.
 
-# Automatically load the latest source-compatible accepted QC from <output_dir>/<recording_id>/qc/.
+# Automatically reuse the latest compatible accepted QC from run folders (including recoverable pending runs); legacy qc/ is still read.
 # Leave this table empty for automatic discovery; add paths only to override individual recordings.
 [qc.annotation_files]
-# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/qc/<saved-version>.json"  # Optional accepted QC or summary.json override; path relative to this TOML.
+# Sub1_M1 = "../outputs/preproc_data/Sub1_M1/run0/qc.json"  # Optional accepted QC or summary.json override; path relative to this TOML.
 
 # Preprocessed signal: automatic correction, accepted polarity, optional detrending and filtering
 [preprocessing]
@@ -83,9 +84,9 @@ spo2_max_interpolation_sec = 30.0  # Maximum complete interpolated SpO2 interval
 
 # Versioned output files and inspection preview
 [output]
-schema_version = "dbat_preprocessing_v3"  # Canonical original/preprocessed/smoothed result schema; new writes must use v3.
+schema_version = "dbat_preprocessing_v4"  # One final root preproc_signal dataset; readers also accept earlier schemas.
 overwrite = false  # Existing outputs are preserved through immutable versioned runs; must remain false.
 filename = "{recording_id}_preprocessing.h5"  # HDF5 filename; recording_id expands to SubN_MN.
-save_preview = true  # Save an original/preprocessed/smoothed waveform inspection PNG for each recording.
+save_preview = true  # Save a final preproc_signal inspection PNG for each recording.
 preview_start_sec = 0.0  # Inspection preview start time in seconds from the recording's native zero origin.
 preview_duration_sec = 60.0  # Inspection preview duration in seconds.

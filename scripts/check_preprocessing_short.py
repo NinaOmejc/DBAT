@@ -5,6 +5,7 @@ Edit configs/default.toml to select recordings, QC review, methods and output.
 Reuses compatible runs or saves versioned HDF5, summary.json and an optional preview.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -38,8 +39,7 @@ def main():
 
             # Quick round-trip check (the original checker remains exhaustive).
             saved = load_preprocessing_result(path)
-            for name in ("original", "preprocessed", "smoothed"):
-                np.testing.assert_array_equal(saved["signals"][name], getattr(result, name))
+            np.testing.assert_array_equal(saved["preproc_signal"], result.preproc_signal)
             for name, mask in result.masks.items():
                 np.testing.assert_array_equal(saved["masks"][name], mask)
             np.testing.assert_array_equal(saved["original_time_sec"], result.original_time_sec)
@@ -48,6 +48,8 @@ def main():
             assert saved["original_fs_hz"] == result.original_fs_hz
             assert saved["processed_fs_hz"] == result.processed_fs_hz
             assert saved["metadata"]["qc"] == result.qc
+            with (path.parent / "qc.json").open(encoding="utf-8") as stream:
+                assert json.load(stream) == result.qc
             logger.info("%s: %s", "Reused" if reused else "Saved and checked", path)
             logger.info("Inspect: %s", path.parent / (
                 "preview.png" if config["output"]["save_preview"] else "summary.json"

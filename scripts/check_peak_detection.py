@@ -4,7 +4,7 @@ Run directly in PyCharm for synthetic checks, or use:
     python scripts/check_peak_detection.py
     python scripts/check_peak_detection.py --h5 outputs/preproc_data/Sub105_M1/run0/Sub105_M1_preprocessing.h5
 
-Reads signals/smoothed on processed_fs_hz; never rewrites source files, smooths
+Reads the final preproc_signal (or legacy signals/smoothed) on processed_fs_hz; never rewrites source files, smooths
 again, accepts manual QC or recalculates features/labels. A failed check raises.
 """
 
@@ -266,7 +266,7 @@ def check_saved_recording(path):
     for name, belt in result["belts"].items():
         validate_belt(belt, result["fs_hz"])
         column = data["channels"].index(name)
-        waveform = data["signals"]["smoothed"][:, column]
+        waveform = data["preproc_signal"][:, column]
         np.testing.assert_array_equal(belt["detection_waveform"], waveform)
         assert belt["smoothing_applied_samples"] == 0
         for left, right, trough in zip(
