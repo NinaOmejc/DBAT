@@ -54,8 +54,7 @@ polyorder = 3  # Savitzky-Golay polynomial degree; must be nonnegative and small
 # Optional slow-drift detrending
 [preprocessing.detrend]
 method = "none"  # none | moving_detrend | robust_median; filtering is configured separately; none avoids repeating external DeTr_Norm preprocessing.
-window_sec = 60.0  # Moving-detrend window in seconds (MATLAB default); effective odd sample length is recorded.
-robust_median_window_sec = 11.0  # Independent moving-median baseline window in seconds; Sub100 experiment used 11 and 45.
+window_sec = 60.0  # Window for the selected detrending method; moving_detrend uses an odd native-sample window, robust_median uses one-second median blocks.
 
 # Optional native-grid Butterworth filtering (SciPy SOS; fourth order per pass)
 [preprocessing.filtering.highpass]

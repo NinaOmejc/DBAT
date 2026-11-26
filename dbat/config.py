@@ -211,7 +211,9 @@ def _validate(config, directory):
         )
     if window_samples(detrend["window_sec"], "seconds", fs_hz) < 3:
         raise ValueError("detrend.window_sec must resolve to at least three samples")
-    window_samples(detrend["robust_median_window_sec"], "seconds", 1.0)
+    if detrend["method"] == "robust_median":
+        block = window_samples(1.0, "seconds", fs_hz)
+        window_samples(detrend["window_sec"], "seconds", fs_hz / block)
     if type(resampling["filter_half_width"]) is not int or resampling["filter_half_width"] < 1:
         raise ValueError("resampling.filter_half_width must be a positive integer")
     beta = resampling["kaiser_beta"]

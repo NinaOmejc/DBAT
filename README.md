@@ -442,9 +442,9 @@ At 200 Hz, the default smoother remains MATLAB-centered **50-sample moving mean*
 so its saved values contain only the artifact correction and optional common-grid resampling. ECG/BP and other channels without an applicable method also pass through.
 
 Detrending remains **none** by default because `DeTr_Norm.dat` can already include
-external detrending/normalization. Optional `moving_detrend` retains the odd 60 s
-moving-mean trend and per-run residual-mean removal. Independent `robust_median`
-uses the tested Sub100 baseline sequence described below. The supplied recording is not
+external detrending/normalization. Optional `moving_detrend` uses an odd native-sample
+window (60 s by default) and per-run residual-mean removal. `robust_median` uses
+the same `window_sec` setting with the Sub100 baseline sequence described below. The supplied recording is not
 claimed to be untouched sensor data.
 
 ## Numerical values, processing support and QC
@@ -555,9 +555,12 @@ not stored in `qc.json`, never used for noise warnings and never excludes sample
 ```toml
 [preprocessing.detrend]
 method = "none"  # Choose robust_median explicitly; default stays none.
-window_sec = 60.0  # Independent MATLAB moving-detrend window.
-robust_median_window_sec = 11.0  # Also supports 20, 45, etc.
+window_sec = 60.0  # Shared window for the selected method; also supports 11, 20, 45, etc.
 ```
+
+`window_sec` controls whichever detrending method is selected. `moving_detrend`
+resolves it to an odd native-sample window; `robust_median` resolves it on the
+one-second block grid. No separate method-specific window setting is required.
 
 `robust_median` reproduces the user-supplied Sub100 experiment's
 `robust_baseline_correction`: complete one-second block medians, nearest-edge

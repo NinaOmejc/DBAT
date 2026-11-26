@@ -49,7 +49,7 @@ def robust_median_detrend(values, fs_hz, window_sec):
 
 
 def detrending_parameters(settings, fs_hz):
-    """Resolve independent moving-mean/robust-median settings and provenance."""
+    """Resolve the shared window for the selected detrending method and provenance."""
     method = settings["detrend"]["method"] if settings["enabled"] else "none"
     seconds = settings["detrend"]["window_sec"]
     window = window_samples(seconds, "seconds", fs_hz)
@@ -61,7 +61,6 @@ def detrending_parameters(settings, fs_hz):
         "mean_offset": "per_finite_non_artifact_run" if method == "moving_detrend" else None,
     }
     if method == "robust_median":
-        seconds = settings["detrend"]["robust_median_window_sec"]
         block = window_samples(1.0, "seconds", fs_hz)
         coarse_window = window_samples(seconds, "seconds", fs_hz / block)
         parameters.update(
