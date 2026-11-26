@@ -259,9 +259,6 @@ class ManualQCEditor:
                 )
                 button.label.set_fontsize(8)
                 button.set_active(available)
-                button.ax.set_facecolor(
-                    "lightblue" if self.qc["baseline_correction"][name] == enabled else "0.94"
-                )
                 if not available:
                     button.label.set_color("0.6")
                 self.baseline_buttons[name][enabled] = button
@@ -513,8 +510,6 @@ class ManualQCEditor:
             "old": previous, "new": enabled, "reviewer": reviewer,
             "created_at_utc": utc_now(), "source": "dbat_manual_qc",
         })
-        for state, button in self.baseline_buttons[name].items():
-            button.ax.set_facecolor("lightblue" if state == enabled else "0.94")
         self._refresh_preview()
 
     def _select_scale(self, label):
@@ -845,6 +840,17 @@ class ManualQCEditor:
                 button.hovercolor = "tab:blue" if active else "0.85"
                 button.ax.set_facecolor(button.color)
                 button.label.set_color("white" if active else "black")
+        for name, buttons in self.baseline_buttons.items():
+            for enabled, button in buttons.items():
+                selected = self.qc["baseline_correction"][name] == enabled
+                selected_color = "tab:blue" if button.active else "0.75"
+                button.color = selected_color if selected else "0.95"
+                button.hovercolor = button.color if selected else "0.85"
+                button.ax.set_facecolor(button.color)
+                button.label.set_color(
+                    "0.6" if not button.active else "white" if selected else "black"
+                )
+                button.label.set_fontweight("bold" if selected else "normal")
         if self.polarity_enabled:
             acknowledge = (
                 self.prepared["polarity"]["polarity_warning"]
