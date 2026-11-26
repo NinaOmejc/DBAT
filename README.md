@@ -160,9 +160,9 @@ requires review; it does not establish DBAT preprocessing QC. Import provenance
 records the cache path/hash and lack of a raw-source hash. MATLAB files are never
 modified. `load_landmarks(path)` reads a saved DBAT landmark revision.
 
-The older `check_peak_detection.py` still asserts the previous policy of keeping
-landmarks outside QC support. Those checks were left unchanged; they do not match
-this stricter QC policy. No automated test files were added or modified.
+The existing `check_peak_detection.py` verifies QC-invalid landmark exclusion,
+missing troughs/IBIs across invalid regions, unavailable channels, and that
+advisory warnings alone preserve landmarks.
 
 ## Development setup
 

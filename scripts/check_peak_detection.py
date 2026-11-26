@@ -6,6 +6,7 @@ Run directly in PyCharm for synthetic checks, or use:
 
 Reads the final preproc_signal on processed_fs_hz; never rewrites source files, smooths
 again, accepts manual QC or recalculates features/labels. A failed check raises.
+QC-invalid landmarks are excluded; automatic advisory warnings alone preserve them.
 """
 
 import argparse
@@ -144,25 +145,39 @@ def check_landmark_edits():
 
 
 def check_masks_and_missing_data():
-    """Keep finite landmarks across QC flags; invalidate supported IBI over gaps/artifacts."""
+    """Exclude QC-invalid landmarks and leave missing troughs/IBIs across invalid gaps."""
     fs = 200.0
     x = np.cos(2 * np.pi * np.arange(24000) / 800)
     baseline = detect_belt(x, fs)
-    artifact = np.zeros(len(x), bool)
-    artifact[1100:1200] = True
-    marked = detect_belt(x, fs, artifact=artifact)
-    np.testing.assert_array_equal(marked["peak_idx"], baseline["peak_idx"])
-    np.testing.assert_array_equal(marked["trough_idx"], baseline["trough_idx"])
-    assert not marked["ibi_valid"][0] and np.isnan(marked["ibi"][0])
-    assert "confirmed_artifact" in marked["ibi_reason"][0]
+    excluded = np.zeros(len(x), bool)
+    excluded[1100:1700] = True  # Covers a baseline trough and the following peak.
+    for masks, reason in (
+        ({"artifact": excluded}, "confirmed_artifact"),
+        ({"valid": ~excluded}, "uncertain_support"),
+    ):
+        marked = detect_belt(x, fs, **masks)
+        expected = baseline["peak_idx"][~excluded[baseline["peak_idx"]]]
+        np.testing.assert_array_equal(marked["peak_idx"], expected)
+        assert not excluded[marked["peak_idx"]].any()
+        finite_troughs = marked["trough_idx"][np.isfinite(marked["trough_idx"])].astype(int)
+        assert not excluded[finite_troughs].any()
+        # Removing the excluded peak leaves one pair spanning the invalid region.
+        np.testing.assert_array_equal(marked["peak_idx"][:2], [800, 2400])
+        assert np.isnan(marked["trough_idx"][0]) and not marked["trough_valid"][0]
+        assert not marked["ibi_valid"][0] and np.isnan(marked["ibi"][0])
+        assert reason in marked["ibi_reason"][0] and "missing_trough" in marked["ibi_reason"][0]
+        np.testing.assert_array_equal(marked["trough_idx"][1:], baseline["trough_idx"][2:])
+        assert marked["ibi_valid"][1:].all()
     unknown = detect_belt(x, fs, valid=np.zeros(len(x), bool))
-    np.testing.assert_array_equal(unknown["trough_idx"], baseline["trough_idx"])
+    assert not unknown["peak_idx"].size and not unknown["trough_idx"].size
     assert not unknown["ibi_valid"].any()
     unavailable = detect_belt(x, fs, channel_status="unavailable")
+    assert not unavailable["peak_idx"].size and not unavailable["trough_idx"].size
     assert not unavailable["breath_valid"].any()
     x[1100:1110] = np.nan
     gap = detect_belt(x, fs)
-    assert any("nonfinite" in reason for reason in gap["ibi_reason"])
+    assert np.isnan(gap["trough_idx"][0]) and not gap["ibi_valid"][0]
+    assert np.isnan(gap["ibi"][0]) and "nonfinite" in gap["ibi_reason"][0]
     for values in (np.array([]), np.full(1000, np.nan), np.zeros(1000)):
         assert not detect_belt(values, fs)["peak_idx"].size
     for values, rate in ((np.zeros((10, 2)), fs), (np.zeros(10), 0)):
@@ -181,7 +196,7 @@ def check_masks_and_missing_data():
 
 
 def check_preprocessed_adapter():
-    """Check processed-rate timing, in-memory/loaded parity and a missing belt."""
+    """Check processed grids, advisory-only masks, memory/loaded parity and missing belts."""
     fs = 100.0
     time = np.arange(6000) / fs
     waveform = np.cos(2 * np.pi * time / 4)
@@ -223,13 +238,24 @@ def check_preprocessed_adapter():
         masks=masks,
         qc=qc,
         provenance=processing,
-        recording=SimpleNamespace(samples=np.zeros_like(values), **identity),
+        recording=SimpleNamespace(
+            samples=np.zeros((identity["n_samples"], len(BELTS))), **identity
+        ),
     )
     from_memory = detect_preprocessed(memory)
     assert from_memory["identity"] == automatic["identity"]
     np.testing.assert_array_equal(
         from_memory["belts"][BELTS[0]]["peak_idx"], automatic["belts"][BELTS[0]]["peak_idx"]
     )
+    advisory = deepcopy(data)
+    for name in ("auto_candidate", "noise_candidate", "unresolved_candidate", "unresolved_noise_candidate"):
+        advisory["masks"][name] = np.ones(values.shape, bool)
+    warned = detect_preprocessed(advisory)
+    for channel in BELTS:
+        for field in ("peak_idx", "trough_idx", "ibi_valid", "breath_valid"):
+            np.testing.assert_array_equal(
+                warned["belts"][channel][field], automatic["belts"][channel][field]
+            )
     one = deepcopy(data)
     one["channels"] = [BELTS[0]]
     one["preproc_signal"] = values[:, :1]
@@ -259,7 +285,7 @@ def check_peak_detection_functions():
 
 
 def check_saved_recording(path):
-    """Read one real DBAT preprocessing HDF5 and check every belt without writing."""
+    """Read one real HDF5 and verify QC exclusions, supported troughs and missing slots."""
     checksum = source_sha256(path)
     data = load_preprocessing_result(path)
     result = detect_preprocessed(data)
@@ -269,11 +295,23 @@ def check_saved_recording(path):
         waveform = data["preproc_signal"][:, column]
         np.testing.assert_array_equal(belt["detection_waveform"], waveform)
         assert belt["smoothing_applied_samples"] == 0
-        for left, right, trough in zip(
+        valid = data["masks"]["valid"][:, column] & ~data["masks"]["artifact"][:, column]
+        assert valid[belt["peak_idx"]].all()
+        finite_troughs = belt["trough_idx"][np.isfinite(belt["trough_idx"])].astype(int)
+        assert valid[finite_troughs].all()
+        if data["metadata"]["qc"]["channel_ratings"][name] == "unavailable":
+            assert not belt["peak_idx"].size and not belt["trough_idx"].size
+        for index, (left, right, trough) in enumerate(zip(
             belt["peak_idx"][:-1], belt["peak_idx"][1:], belt["trough_idx"], strict=True
-        ):
-            if right - left > 1 and np.isfinite(waveform[left : right + 1]).all():
+        )):
+            supported = (right - left > 1 and valid[left : right + 1].all()
+                         and np.isfinite(waveform[left : right + 1]).all())
+            if supported:
+                assert belt["ibi_valid"][index]
                 assert trough == left + 1 + np.argmin(waveform[left + 1 : right])
+            else:
+                assert np.isnan(trough) and not belt["ibi_valid"][index]
+                assert np.isnan(belt["ibi"][index]) and not belt["trough_valid"][index]
         logger.info(
             "%s: %d candidates, %d retained peaks, %d trough slots, %d assessable IBIs",
             name,
