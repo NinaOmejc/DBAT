@@ -20,7 +20,7 @@ from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
-ALGORITHM_VERSION = "dbat_auto_cleaning_v7"
+ALGORITHM_VERSION = "dbat_auto_cleaning_v8"
 BELT_RESIDUAL_WINDOWS_SEC = (0.4, 1.2)
 BELT_MORPHOLOGY = {
     "context_sec": 2.0,
@@ -43,6 +43,7 @@ ABRUPT_EXCURSION = {
     "minimum_reference_sec": 4.0,
     "amplitude_mad_multiplier": 4.0,
     "amplitude_span_multiplier": 1.5,
+    "downward_depth_limit_cap": 5.0,
     # Preserve strict upward-lobe limits; relax only downward-triggered review.
     "slope_percentile_multiplier": 4.0,
     "slope_mad_multiplier": 6.0,
@@ -315,8 +316,9 @@ def abrupt_excursion_candidates(values, fs_hz):
     tuple
         Native Boolean candidate mask, review-only events with local thresholds,
         and assessment info. Downward depth from the local reference median must
-        exceed the local amplitude limit. Finite bases must return to that
-        reference, and the falling slope must exceed its local limit.
+        exceed the local amplitude limit capped at 5 input-signal units.
+        Finite bases must return to that reference, and the falling slope
+        must exceed its local limit.
         A preceding upward lobe retains the stricter slope limits. A qualifying
         downward leg and its overshoot/return share one review interval (<=6 s).
         Isolated upward breaths/sighs are not movement candidates. No interpolation
@@ -391,11 +393,11 @@ def abrupt_excursion_candidates(values, fs_hz):
             left_base = int(properties["left_bases"][index])
             right_base = int(properties["right_bases"][index])
             depth = reference_level - float(estimate[peak])
+            depth_limit = min(amplitude_limit, parameters["downward_depth_limit_cap"])
             falling_slope = float(-np.min(slopes[start:peak]))
-            # The downward component itself must clear the amplitude limit;
-            # neighbouring upward peaks cannot supply its depth evidence.
+            # Require substantial downward depth independently of upward peaks.
             if (
-                depth <= amplitude_limit
+                depth <= depth_limit
                 or estimate[left_base] < reference_level
                 or estimate[right_base] < reference_level
                 or falling_slope <= slope_limit
@@ -442,7 +444,7 @@ def abrupt_excursion_candidates(values, fs_hz):
                 "pattern": pattern,
                 "reference_level": reference_level,
                 "downward_depth": depth,
-                "downward_depth_limit": float(amplitude_limit),
+                "downward_depth_limit": float(depth_limit),
                 "falling_slope_per_sec": falling_slope,
                 "preceding_upward_amplitude": upward_amplitude,
                 "rebound_peak_sample": rebound_peak,
@@ -687,7 +689,7 @@ def clean_recording(recording, config):
             **ABRUPT_EXCURSION,
             "patterns": ["downward_with_recovery", "upward_downward", "downward_upward"],
             "direction_basis": "source polarity before manual inversion",
-            "recovery_policy": "depth below local median exceeds local amplitude limit; both prominence bases reach that median",
+            "recovery_policy": "depth below local median exceeds min(local amplitude limit, configured depth cap); both prominence bases reach that median",
             "rebound_policy": "after a qualifying dip, group an overshoot above reference P90 and its median return within 6 s; no separate upward slope threshold",
         },
         "paired_gaussian_sigma_sec": 0.10,

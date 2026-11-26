@@ -269,11 +269,13 @@ least 4 s of finite reference data, drawn from up to 15 s with a 0.5 s guard.
 Prominence must exceed both four scaled MADs and 1.5 times the reference P90-P10
 span. Downward excursions use review-only slope limits of 1.25 times reference
 P95 absolute slope and three scaled MADs. Maximum slope/prominence must still be
-at least 2.5/s. Only the downward slope thresholds are relaxed.
+at least 2.5/s. Upward-lobe slope thresholds stay unchanged.
 
-The downward depth below the reference median must also exceed the same local
-amplitude limit (max of four scaled MADs and 1.5 times the P90-P10 span). This
-prevents a small dip from qualifying through neighbouring upward peaks alone.
+The downward depth below the reference median must exceed the smaller of the
+local amplitude limit and **5 input-signal units**. Lower adaptive limits remain
+unchanged; strong dips are no longer blocked by an unusually high depth limit.
+The separate prominence requirement still uses the full local amplitude limit.
+This prevents a small dip from qualifying through neighbouring upward peaks alone.
 Its falling slope must exceed the local slope limit, and both prominence bases
 must recover to the reference median. A preceding upward
 lobe is labelled biphasic only if its height exceeds the existing amplitude limit,
