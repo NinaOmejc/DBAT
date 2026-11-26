@@ -258,9 +258,11 @@ span. Downward excursions use review-only slope limits of 1.25 times reference
 P95 absolute slope and three scaled MADs. Maximum slope/prominence must still be
 at least 2.5/s. Only the downward slope thresholds are relaxed.
 
-To exclude isolated upward breaths/sighs, a candidate must also descend below the
-reference median, have an abrupt falling slope exceeding the local slope limit,
-and recover to the reference median at both prominence bases. A preceding upward
+The downward depth below the reference median must also exceed the same local
+amplitude limit (max of four scaled MADs and 1.5 times the P90-P10 span). This
+prevents a small dip from qualifying through neighbouring upward peaks alone.
+Its falling slope must exceed the local slope limit, and both prominence bases
+must recover to the reference median. A preceding upward
 lobe is labelled biphasic only if its height exceeds the existing amplitude limit,
 its rising slope exceeds the original stricter limits (four times P95 and six
 scaled MADs), and the combined interval is at most 6 s.
