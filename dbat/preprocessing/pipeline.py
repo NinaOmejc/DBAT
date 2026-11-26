@@ -26,6 +26,7 @@ from .annotations import (
     unresolved_candidate_mask,
 )
 from .cleaning import prepare_recording
+from .detrending import detrending_parameters
 from .filtering import detrend_and_filter_recording, filtering_support
 from .polarity import apply_polarity, orient_prepared
 from .resampling import resample_preprocessed, resample_masks
@@ -48,6 +49,8 @@ class PreprocessedRecording:
     provenance: dict
     signal_quality: dict
     native_conditioning_masks: dict  # In-memory GUI support only; never written to HDF5.
+    native_preprocessed: np.ndarray  # Preview cache only; no intermediate waveforms are saved.
+    native_detrended: np.ndarray
 
     @property
     def original(self):
@@ -85,24 +88,37 @@ class PreprocessedRecording:
             )
 
 
-def numerical_input_signature(prepared, config, qc, choice):
-    """Identify numerical inputs; ratings/coverage never alter the waveform.
-
-    Manual artifacts affect numerical values only when selected belts are
-    detrended. Filter/support masks still update when those values are reused.
-    """
+def _channel_input_signatures(prepared, config, qc, choice):
+    """Hash actual per-channel numerical inputs, excluding ratings and coverage."""
     settings = config["preprocessing"]
-    artifacts = []
-    if settings["enabled"] and settings["detrend"]["method"] != "none":
-        for interval in qc["artifacts"]:
-            channels = sorted(set(interval["channels"]) & set(settings["channels"]))
-            if channels:
-                artifacts.append(
-                    [interval["start_sample"], interval["end_sample"], channels]
-                )
+    common = {key: value for key, value in settings.items() if key != "detrend"}
+    signatures = {}
+    for name in config["input"]["channels"]:
+        parameters = detrending_parameters(settings, config["input"]["fs_hz"], name, qc)
+        artifacts = []
+        if name in BELTS and parameters["method"] != "none":
+            artifacts = sorted(
+                [item["start_sample"], item["end_sample"]]
+                for item in qc["artifacts"] if name in item["channels"]
+            )
+        signatures[name] = hashlib.sha256(
+            json.dumps(
+                [prepared["signature"], common, parameters, name == choice, artifacts],
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    return signatures
+
+
+def numerical_input_signature(prepared, config, qc, choice):
+    """Identify waveform inputs, including actual per-belt baseline decisions.
+
+    Manual artifacts affect numerical values only when a belt is detrended.
+    Ratings and coverage update masks without invalidating numerical previews.
+    """
     return hashlib.sha256(
         json.dumps(
-            [prepared["signature"], settings, choice, sorted(artifacts)], sort_keys=True
+            _channel_input_signatures(prepared, config, qc, choice), sort_keys=True
         ).encode()
     ).hexdigest()
 
@@ -159,7 +175,7 @@ def refresh_qc_masks(result, config, qc, prepared):
     support = masks["finite"] & ~masks["artifact"]
     for column, name in enumerate(recording.channels):
         if diagnostics["channel_processors"][name] == "belt_conditioning":
-            if diagnostics["detrend"]["method"] == "none":
+            if diagnostics["detrend"]["per_channel"][name]["method"] == "none":
                 support[:, column] = filtering_support(
                     support[:, column], diagnostics["filtering"][name]
                 )
@@ -205,12 +221,13 @@ def refresh_qc_masks(result, config, qc, prepared):
         provisional=True,
         numerical_input_signature=signature,
         preprocessing_impact=diagnostics["preprocessing_impact"],
+        numerical_channel_signatures=diagnostics["numerical_channel_signatures"],
     )
     return updated
 
 
 def preprocess_recording(
-    recording, config, qc_annotations=None, prepared=None, *, provisional=False
+    recording, config, qc_annotations=None, prepared=None, *, provisional=False, previous=None
 ):
     """Correct, detrend/filter natively, optionally resample once, then smooth once.
 
@@ -227,6 +244,9 @@ def preprocess_recording(
     provisional : bool, optional
         Preview private, unaccepted edits and unresolved polarity without saving.
         Final processing still requires accepted evidence and polarity resolution.
+    previous : PreprocessedRecording, optional
+        In-memory GUI preview. Only channels with identical numerical signatures
+        are reused; final accepted processing always recomputes from source.
 
     Returns
     -------
@@ -269,25 +289,46 @@ def preprocess_recording(
         },
     )
     settings = config["preprocessing"]
-
+    channel_signatures = _channel_input_signatures(
+        prepared, config, qc, decision["choice"] if decision else None
+    )
+    if previous is not None and (
+        not provisional
+        or recording_identity(previous.recording) != recording_identity(recording)
+    ):
+        previous = None
+    prior_signatures = previous.provenance["numerical_channel_signatures"] if previous else {}
+    changed = {
+        name for name, signature in channel_signatures.items()
+        if prior_signatures.get(name) != signature
+    }
     preprocessed, diagnostics, detrended = detrend_and_filter_recording(
-        corrected, recording, settings, masks
+        corrected, recording, settings, masks, qc, previous=previous, changed=changed
     )
     native_conditioning_masks = {
         "preprocessed_support": masks["preprocessed_support"],
         "preprocessed_interpolated": masks["preprocessed_interpolated"],
         "finite": np.isfinite(preprocessed),
     }
+    native_preprocessed = preprocessed
+    # A grid-setting change invalidates every channel, including cached shapes.
+    same_grid = previous is not None and (
+        previous.provenance["resampling"]["requested_fs_hz"]
+        == settings["resampling"]["resample_freq"]
+    )
     preprocessed, masks, processed_fs, times, resampling = resample_preprocessed(
-        preprocessed, masks, recording.fs_hz, settings["resampling"]
+        preprocessed, masks, recording.fs_hz, settings["resampling"],
+        previous=previous.preprocessed if same_grid else None,
+        changed_columns={recording.channels.index(name) for name in changed},
     )
     diagnostics["resampling"] = resampling
     smoothed = smooth_recording(
-        preprocessed, recording, processed_fs, settings, masks, diagnostics
+        preprocessed, recording, processed_fs, settings, masks, diagnostics,
+        previous=previous if same_grid else None, changed=changed,
     )
 
     numerical_signature = hashlib.sha256(
-        json.dumps([prepared["signature"], settings], sort_keys=True).encode()
+        json.dumps(channel_signatures, sort_keys=True).encode()
     ).hexdigest()
     quality = assess_signal_quality(
         recording,
@@ -296,6 +337,7 @@ def preprocess_recording(
         processed_fs,
         settings["signal_quality"],
         numerical_signature,
+        previous=previous.signal_quality if previous else None, changed=changed,
     )
     _add_noise_masks(masks, recording, qc, prepared, quality, times)
     result = PreprocessedRecording(
@@ -309,12 +351,13 @@ def preprocess_recording(
         diagnostics,
         quality,
         native_conditioning_masks,
+        native_preprocessed,
+        detrended,
     )
     result.provenance = preprocessing_provenance(result, config, prepared, decision)
     result.provenance["provisional"] = provisional
-    result.provenance["numerical_input_signature"] = numerical_input_signature(
-        prepared, config, qc, decision["choice"] if decision else None
-    )
+    result.provenance["numerical_channel_signatures"] = channel_signatures
+    result.provenance["numerical_input_signature"] = numerical_signature
     oriented_original = apply_polarity(
         recording.samples, recording.channels, decision["choice"] if decision else None
     )
@@ -325,6 +368,8 @@ def preprocess_recording(
         detrended,
         smoothed,
         processed_fs,
+        previous=previous.provenance["preprocessing_impact"] if previous else None,
+        changed=changed,
     )
     result.provenance["preprocessing_impact"]["processing_settings"] = {
         "detrend": diagnostics["detrend"],

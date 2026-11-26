@@ -67,7 +67,9 @@ def resample_masks(native_masks, native_finite, processed_finite, *, up, down, r
     return masks
 
 
-def resample_preprocessed(values, masks, native_fs, settings):
+def resample_preprocessed(
+    values, masks, native_fs, settings, *, previous=None, changed_columns=None
+):
     """Return the primary preprocessed grid and conservatively mapped masks.
 
     Parameters
@@ -80,6 +82,11 @@ def resample_preprocessed(values, masks, native_fs, settings):
         Original sampling rate in Hz.
     settings : dict
         Target frequency in Hz (0 disables), FIR half-width and Kaiser beta.
+    previous : ndarray, optional
+        Cached processed-grid values. Only changed_columns are resampled again;
+        masks are always remapped from current native annotations.
+    changed_columns : set of int, optional
+        Numerical input columns changed since previous, verified by the caller.
 
     Returns
     -------
@@ -121,9 +128,13 @@ def resample_preprocessed(values, masks, native_fs, settings):
 
     finite = np.isfinite(values)
     available = finite[left] & finite[right]
-    resampled = np.full((output_count, n_channels), np.nan)
+    resampled = (np.full((output_count, n_channels), np.nan)
+                 if previous is None else previous.copy())
     index = np.arange(n_samples)
     for column in range(n_channels):
+        if previous is not None and column not in changed_columns:
+            continue
+        resampled[:, column] = np.nan
         observed = finite[:, column]
         if not observed.any():
             continue

@@ -26,7 +26,7 @@ from ..preprocessing.annotations import (
 )
 
 
-PREPROCESSING_ALGORITHM = "dbat_preprocessing_v8"
+PREPROCESSING_ALGORITHM = "dbat_preprocessing_v9"
 
 
 @dataclass(frozen=True)
@@ -538,6 +538,15 @@ def preprocessing_provenance(result, config, prepared, decision):
         "qc_channels": config["qc"]["channels"],
         "channel_processors": processors,
         "detrend": detrend_parameters,
+        "baseline_correction": {
+            name: {
+                "enabled": parameters["method"] == "robust_median",
+                "source": "qc" if name in result.qc.get("baseline_correction", {})
+                else "config" if name in settings["detrend"].get("baseline_correction", {})
+                else "legacy_method_setting",
+            }
+            for name, parameters in detrend_parameters["per_channel"].items()
+        },
         "filtering": filter_details,
         "smoothing": smoothing_parameters,
         "signal_quality": {key: result.signal_quality[key] for key in ("algorithm_version", "settings", "channels", "policy")},

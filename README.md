@@ -451,7 +451,7 @@ claimed to be untouched sensor data.
 
 Conditioning depends on `preprocessing.channels`, never the channel rating,
 `qc.channels`, or reviewed coverage. An unreviewed recording receives the same
-numerical conditioning as a reviewed recording with the same artifact/polarity
+numerical conditioning as a reviewed recording with the same baseline/artifact/polarity
 annotations, but has zero approved `valid` samples. Original values never change.
 
 The moving mean uses `round(window_sec * processed_fs_hz)` (MATLAB rounding),
@@ -554,30 +554,47 @@ not stored in `qc.json`, never used for noise warnings and never excludes sample
 
 ```toml
 [preprocessing.detrend]
-method = "none"  # Choose robust_median explicitly; default stays none.
-window_sec = 60.0  # Shared window for the selected method; also supports 11, 20, 45, etc.
+method = "none"  # Legacy fallback when no per-belt config or QC choice exists.
+window_sec = 60.0  # Single window setting for the chosen detrending method.
+transition_sec = 25.0  # Fade duration after each unchanged half-window guard.
+
+[preprocessing.detrend.baseline_correction]
+"Resp-Lungs" = false  # Independent default, also used with the GUI disabled.
+"Resp-Diaphragm" = false
 ```
 
-`window_sec` controls whichever detrending method is selected. `moving_detrend`
-resolves it to an odd native-sample window; `robust_median` resolves it on the
-one-second block grid. No separate method-specific window setting is required.
+Both belts default to **Off**. The QC GUI has independent Off/On buttons beside
+polarity; On selects `robust_median`, Off applies no baseline correction. The
+accepted `baseline_correction` map in each run's `qc.json` overrides these config
+defaults. Toggling records reviewer/time in edit history and does not mark any
+samples reviewed. Existing QC without the map is readable; older configs without
+per-belt defaults retain their `method` behavior in GUI-disabled processing.
+The GUI exposes only robust-median On/Off and saves those explicit choices.
+Global preprocessing enablement and selected belt channels still apply.
 
-`robust_median` reproduces the user-supplied Sub100 experiment's
-`robust_baseline_correction`: complete one-second block medians, nearest-edge
-moving median, [SciPy PCHIP](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.PchipInterpolator.html)
-at block centres, then native-grid Gaussian baseline smoothing (sigma 0.7 s,
-reflect edges, truncate 4). It subtracts the baseline and restores its global
-median offset. A trailing incomplete second is excluded from block estimation;
-the baseline is extrapolated back to every original sample. No abrupt-step
-correction or extra baseline correction in `smoothing.py` is added.
+`window_sec` remains the single setting: `moving_detrend` resolves an odd native
+sample window; `robust_median` resolves one-second median blocks. The robust
+estimator reuses the supplied Sub100 experiment's complete block medians,
+[SciPy PCHIP](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.PchipInterpolator.html),
+and Gaussian baseline smoothing (sigma 0.7 s, reflect, truncate 4).
+Only fully supported median windows enter PCHIP; there is no edge extrapolation.
+The baseline correction subtracts the estimated baseline minus its median.
 
-Only configured belts are affected. Genuine gaps/confirmed artifacts split runs;
-excluded values are retained, and runs shorter than two complete blocks pass
-through with false support. Conservative baseline-neighbourhood masks exclude
-contamination around internal gaps/artifacts. Interpolation influence also tracks
-the run-wide restored offset. Original count/rate/time origin stay unchanged.
-Method, requested/effective windows, interpolation/Gaussian settings, support radius
-and the experiment source SHA-256 are recorded in provenance.
+Each finite, non-artifact segment keeps its first/last `window_sec / 2` seconds
+exactly unchanged at the baseline stage. A raised-cosine fade applies to the
+**correction**, with zero slope at the transition ends. Overlapping transitions
+shorten to meet smoothly at the segment midpoint. Segments too short for a
+supported baseline and guards remain unchanged, with the reason recorded.
+No samples are cropped, shifted, or removed. These unchanged edges/short segments
+retain numerical support; actual artifacts/missing data remain masked. Filters,
+resampling and the single respiratory smoothing pass still follow this stage.
+
+Per-belt methods, effective windows, segment guards/fades, and the estimator's
+source SHA-256 are recorded in HDF5 processing provenance and MAE settings.
+Preview edits recompute only channels whose actual numerical inputs changed;
+other channel waveforms, quality windows and impact metrics are reused in memory.
+Coverage/ratings remain mask-only updates. Final accepted processing recomputes
+from source before saving, and no intermediate waveforms are written to disk.
 
 ## Optional filtering, separate from detrending
 

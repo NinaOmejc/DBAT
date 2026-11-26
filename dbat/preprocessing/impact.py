@@ -1,12 +1,15 @@
 """Finite-pair MAE measures preprocessing impact, never signal quality or validity."""
 
+from copy import deepcopy
+
 import numpy as np
 
 from ..config import BELTS, window_samples
 
 
 def preprocessing_impact(
-    recording, original, cleaned, detrended, final, processed_fs_hz
+    recording, original, cleaned, detrended, final, processed_fs_hz,
+    *, previous=None, changed=None
 ):
     """Calculate four stage MAEs in 30 s/10 s windows and over each whole belt.
 
@@ -26,6 +29,10 @@ def preprocessing_impact(
         Final waveform on the zero-origin processed grid.
     processed_fs_hz : float
         Processed sampling rate in Hz.
+    previous : dict, optional
+        Cached impact metrics; unchanged channels are copied without recalculation.
+    changed : set of str, optional
+        Channels with changed numerical inputs, checked by the caller.
 
     Returns
     -------
@@ -63,6 +70,9 @@ def preprocessing_impact(
     }
     for column, channel in enumerate(recording.channels):
         if channel not in BELTS:
+            continue
+        if previous is not None and channel not in changed:
+            result["channels"][channel] = deepcopy(previous["channels"][channel])
             continue
 
         def aligned(values):

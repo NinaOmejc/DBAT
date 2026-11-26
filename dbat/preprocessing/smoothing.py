@@ -110,7 +110,10 @@ def smooth_belt(values, support, eligible, interpolated, parameters):
     return output, numeric_support, valid, influence, skips
 
 
-def smooth_recording(preprocessed, recording, processed_fs, settings, masks, diagnostics):
+def smooth_recording(
+    preprocessed, recording, processed_fs, settings, masks, diagnostics,
+    *, previous=None, changed=None
+):
     """Smooth selected processed-grid belts once, updating masks and diagnostics.
 
     Parameters
@@ -125,6 +128,10 @@ def smooth_recording(preprocessed, recording, processed_fs, settings, masks, dia
         Existing preprocessing/smoothing settings.
     masks, diagnostics : dict
         Updated in place with smoothing support, influence and skipped runs.
+    previous : PreprocessedRecording, optional
+        Preview cache for unchanged channels; their masks still reflect current QC.
+    changed : set of str, optional
+        Channels whose numerical inputs changed, verified by the caller.
 
     Returns
     -------
@@ -154,6 +161,20 @@ def smooth_recording(preprocessed, recording, processed_fs, settings, masks, dia
     masks["valid"] = masks["preprocessed_valid"].copy()
     for column, name in enumerate(recording.channels):
         if processors[name] == "belt_conditioning":
+            if previous is not None and name not in changed:
+                smoothed[:, column] = previous.preproc_signal[:, column]
+                (
+                    masks["smoothed_support"][:, column],
+                    masks["valid"][:, column],
+                    masks["smoothed_interpolated"][:, column],
+                ) = smoothing_masks(
+                    np.isfinite(preprocessed[:, column]),
+                    masks["preprocessed_support"][:, column],
+                    masks["eligible"][:, column],
+                    masks["preprocessed_interpolated"][:, column],
+                    smoothing_parameters,
+                )
+                continue
             (
                 smoothed[:, column],
                 masks["smoothed_support"][:, column],

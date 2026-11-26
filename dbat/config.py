@@ -211,7 +211,15 @@ def _validate(config, directory):
         )
     if window_samples(detrend["window_sec"], "seconds", fs_hz) < 3:
         raise ValueError("detrend.window_sec must resolve to at least three samples")
-    if detrend["method"] == "robust_median":
+    decisions = detrend.get("baseline_correction", {})
+    if (not isinstance(decisions, dict) or not set(decisions) <= set(BELTS)
+            or any(type(value) is not bool for value in decisions.values())):
+        raise ValueError("detrend.baseline_correction must map respiratory belt names to booleans")
+    transition = detrend.get("transition_sec", 25.0)
+    if (isinstance(transition, bool) or not isinstance(transition, (int, float))
+            or not math.isfinite(transition) or transition <= 0):
+        raise ValueError("detrend.transition_sec must be positive and finite")
+    if detrend["method"] == "robust_median" or any(decisions.values()):
         block = window_samples(1.0, "seconds", fs_hz)
         window_samples(detrend["window_sec"], "seconds", fs_hz / block)
     if type(resampling["filter_half_width"]) is not int or resampling["filter_half_width"] < 1:

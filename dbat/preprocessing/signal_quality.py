@@ -1,5 +1,7 @@
 """Review-only belt quality metrics; no waveform correction or clinical labels."""
 
+from copy import deepcopy
+
 import hashlib
 import json
 
@@ -132,7 +134,8 @@ def _limit(values, floor, *, minimum_increment=0.0):
 
 
 def assess_signal_quality(
-    recording, cleaned, final, processed_fs_hz, settings, signature
+    recording, cleaned, final, processed_fs_hz, settings, signature,
+    *, previous=None, changed=None
 ):
     """Measure native noise and residual final usability without changing samples.
 
@@ -147,7 +150,11 @@ def assess_signal_quality(
     settings : dict
         Window/step, bands, Welch segment, finite coverage and review flag settings.
     signature : str
-        Source plus numerical-preprocessing identity; excludes manual decisions.
+        Source plus numerical-preprocessing identity, including waveform decisions.
+    previous : dict, optional
+        Cached quality metrics; unchanged channels reuse their windows and summary.
+    changed : set of str, optional
+        Channels with changed numerical inputs, checked by the caller.
 
     Returns
     -------
@@ -199,6 +206,12 @@ def assess_signal_quality(
     events = []
     for column, channel in enumerate(recording.channels):
         if channel not in BELTS:
+            continue
+        if previous is not None and channel not in changed:
+            result["channels"][channel] = deepcopy(previous["channels"][channel])
+            result["windows"].extend(deepcopy([
+                row for row in previous["windows"] if row["channel"] == channel
+            ]))
             continue
         flat, clipped, constant = _plateau_masks(cleaned[:, column], recording.fs_hz)
         rows, previous_noise = [], None
@@ -355,30 +368,6 @@ def assess_signal_quality(
             ):
                 row["reasons"].append("constant_waveform")
             row["flagged"] = bool(row["reasons"])
-            if row["flagged"] and settings["flag_candidates"]:
-                candidate_mask[row["start_sample"] : row["end_sample"], column] = True
-                for reason in row["reasons"]:
-                    events.append(
-                        {
-                            "channel": channel,
-                            "action": "review_candidate",
-                            "reason": reason,
-                            "start_sample": row["start_sample"],
-                            "end_sample": row["end_sample"],
-                            "start_sec": row["start_sec"],
-                            "end_sec": row["end_sec"],
-                            "metrics": {
-                                key: row[key]
-                                for key in (
-                                    "hf_noise_ratio",
-                                    "final_hf_noise_ratio",
-                                    "noise_instability_db",
-                                    "flatline_fraction",
-                                    "clipping_fraction",
-                                )
-                            },
-                        }
-                    )
         defined = [row for row in rows if row["flatline_fraction"] is not None]
 
         def median_metric(key):
@@ -410,6 +399,33 @@ def assess_signal_quality(
             },
         }
         result["windows"].extend(rows)
+    for row in result["windows"]:
+        channel = row["channel"]
+        column = recording.channels.index(channel)
+        if row["flagged"] and settings["flag_candidates"]:
+            candidate_mask[row["start_sample"] : row["end_sample"], column] = True
+            for reason in row["reasons"]:
+                events.append(
+                    {
+                        "channel": channel,
+                        "action": "review_candidate",
+                        "reason": reason,
+                        "start_sample": row["start_sample"],
+                        "end_sample": row["end_sample"],
+                        "start_sec": row["start_sec"],
+                        "end_sec": row["end_sec"],
+                        "metrics": {
+                            key: row[key]
+                            for key in (
+                                "hf_noise_ratio",
+                                "final_hf_noise_ratio",
+                                "noise_instability_db",
+                                "flatline_fraction",
+                                "clipping_fraction",
+                            )
+                        },
+                    }
+                )
     stage_signature = hashlib.sha256(
         json.dumps([ALGORITHM_VERSION, signature, settings], sort_keys=True).encode()
     ).hexdigest()

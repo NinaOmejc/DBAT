@@ -22,6 +22,7 @@ from .annotations import (
     validate_qc_annotations,
 )
 from .cleaning import prepare_recording
+from .detrending import detrending_parameters
 from .pipeline import preprocess_recording, numerical_input_signature, refresh_qc_masks
 from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
 
@@ -89,6 +90,13 @@ class ManualQCEditor:
         self.corrected = apply_polarity(
             self.prepared["corrected"], recording.channels, self.polarity_choice
         )
+        # Old QC remains readable; new sessions explicitly save both belt choices.
+        self.qc["baseline_correction"] = {
+            name: detrending_parameters(
+                config["preprocessing"], recording.fs_hz, name, self.qc
+            )["method"] == "robust_median"
+            for name in BELTS
+        }
         self.qc["parent_qc_file"] = self.qc.get("loaded_from_file")
         self.preview = (
             preview
@@ -101,6 +109,13 @@ class ManualQCEditor:
                 provisional=True,
             )
         )
+        if self.preview.provenance["numerical_input_signature"] != numerical_input_signature(
+            self.prepared, self.config, self.qc, self.polarity_choice
+        ):
+            self.preview = preprocess_recording(
+                recording, self.config, self.qc, prepared=self.prepared, provisional=True,
+                previous=self.preview,
+            )
         if recording_identity(self.preview.recording) != recording_identity(recording):
             raise ValueError("Preprocessed preview does not match this recording")
         self.preview_error = None
@@ -192,7 +207,7 @@ class ManualQCEditor:
         if self.polarity_enabled:
             self.figure.text(0.79, 0.545, "Belt polarity correction", fontsize=9)
             self.polarity_button = self._button(
-                (0.79, 0.500, 0.19, 0.032),
+                (0.79, 0.510, 0.19, 0.028),
                 POLARITY_LABELS[POLARITY_CHOICES.index(self.polarity_choice)] + "  v",
                 self._toggle_polarity_menu,
             )
@@ -211,21 +226,45 @@ class ManualQCEditor:
             if self.previous_polarity_stale:
                 diagnostic += "\nPrevious choice needs review: cleaning changed"
             self.polarity_diagnostic = self.figure.text(
-                0.79,
-                0.488,
+                0.09,
+                0.252,
                 diagnostic,
                 va="top",
                 fontsize=7.5,
                 color="red" if self.prepared["polarity"]["polarity_warning"] else "black",
             )
             self.polarity_ack = CheckButtons(
-                self.figure.add_axes((0.79, 0.395, 0.19, 0.036)),
+                self.figure.add_axes((0.79, 0.477, 0.19, 0.025)),
                 ("Keep None despite warning",),
                 (bool(compatible and previous["acknowledged_warning"]),),
             )
             self.polarity_ack.labels[0].set_fontsize(8)
             self.polarity_ack.ax.set_frame_on(False)
             self.polarity_ack.on_clicked(self._acknowledge_polarity)
+        self.figure.text(0.79, 0.461, "Baseline correction (robust median)", fontsize=8)
+        self.baseline_buttons = {}
+        for row, name in enumerate(BELTS):
+            bottom = 0.428 - 0.034 * row
+            self.figure.text(0.79, bottom + 0.013, name, fontsize=8, va="center")
+            self.baseline_buttons[name] = {}
+            available = (
+                config["preprocessing"]["enabled"]
+                and name in config["preprocessing"]["channels"]
+            )
+            for column, enabled in enumerate((False, True)):
+                button = self._button(
+                    (0.902 + 0.040 * column, bottom, 0.038, 0.025),
+                    "On" if enabled else "Off",
+                    lambda event, name=name, enabled=enabled: self._set_baseline(name, enabled),
+                )
+                button.label.set_fontsize(8)
+                button.set_active(available)
+                button.ax.set_facecolor(
+                    "lightblue" if self.qc["baseline_correction"][name] == enabled else "0.94"
+                )
+                if not available:
+                    button.label.set_color("0.6")
+                self.baseline_buttons[name][enabled] = button
         self.scope = RadioButtons(
             self.figure.add_axes((0.79, 0.305, 0.19, 0.075)),
             ("Both belts", "Dragged channel"),
@@ -460,6 +499,24 @@ class ManualQCEditor:
         if self._update_polarity_decision():
             self._refresh_preview()
 
+    def _set_baseline(self, name, enabled):
+        """Set one belt's numerical baseline option without asserting QC coverage."""
+        previous = self.qc["baseline_correction"][name]
+        if previous == enabled:
+            return
+        reviewer = self._reviewer_name()
+        if not reviewer:
+            return
+        self.qc["baseline_correction"][name] = enabled
+        self.qc["edit_history"].append({
+            "action": "set_baseline_correction", "channel": name,
+            "old": previous, "new": enabled, "reviewer": reviewer,
+            "created_at_utc": utc_now(), "source": "dbat_manual_qc",
+        })
+        for state, button in self.baseline_buttons[name].items():
+            button.ax.set_facecolor("lightblue" if state == enabled else "0.94")
+        self._refresh_preview()
+
     def _select_scale(self, label):
         """Set common or independent belt amplitude limits without changing values."""
         self.scale_mode = label.lower()
@@ -494,6 +551,7 @@ class ManualQCEditor:
                     qc,
                     prepared=self.prepared,
                     provisional=True,
+                    previous=self.preview,
                 )
         except (ValueError, FloatingPointError) as error:
             self.preview = None

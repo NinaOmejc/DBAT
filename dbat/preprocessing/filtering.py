@@ -1,5 +1,7 @@
 """Optional SciPy Butterworth filtering across each finite native belt waveform."""
 
+from copy import deepcopy
+
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
@@ -132,7 +134,9 @@ def preprocess_belt(values, artifact, interpolated, fs_hz, detrend, filtering):
     return output, support & filter_support, influence, filter_details, skips, detrended
 
 
-def detrend_and_filter_recording(corrected, recording, settings, masks):
+def detrend_and_filter_recording(
+    corrected, recording, settings, masks, qc=None, *, previous=None, changed=None
+):
     """Apply native belt conditioning in the original per-channel order.
 
     Parameters
@@ -145,6 +149,12 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
         Existing preprocessing settings, including enabled and selected channels.
     masks : dict of ndarray
         Native masks; preprocessing support/influence/validity are added in place.
+    qc : dict, optional
+        Accepted or private preview per-belt baseline choices, overriding config.
+    previous : PreprocessedRecording, optional
+        Preview cache; unchanged channels reuse native values and stage diagnostics.
+    changed : set of str, optional
+        Channels whose numerical signatures changed, checked by the caller.
 
     Returns
     -------
@@ -153,7 +163,8 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
         selected belt is detrended, high-pass filtered and low-pass filtered
         before advancing to the next channel. Other channels pass through.
     """
-    detrend_parameters = detrending_parameters(settings, recording.fs_hz)
+    # Previous native arrays are private preview caches, never saved waveforms.
+    per_channel = {}
     filtering = {
         name: {**options, "enabled": options["enabled"] and settings["enabled"]}
         for name, options in settings["filtering"].items()
@@ -165,6 +176,23 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
     processors, filter_details, processing_skips = {}, {}, {}
     for column, name in enumerate(recording.channels):
         if name in BELTS and name in settings["channels"]:
+            parameters = detrending_parameters(settings, recording.fs_hz, name, qc)
+            per_channel[name] = parameters
+            if previous is not None and name not in changed:
+                per_channel[name] = deepcopy(previous.provenance["detrend"]["per_channel"][name])
+                preprocessed[:, column] = previous.native_preprocessed[:, column]
+                detrended[:, column] = previous.native_detrended[:, column]
+                filter_details[name] = previous.provenance["filtering"][name]
+                processing_skips[name] = deepcopy(previous.provenance["processing_skips"][name])
+                native = previous.native_conditioning_masks
+                masks["preprocessed_support"][:, column] = (
+                    filtering_support(masks["preprocessed_support"][:, column], filter_details[name])
+                    if parameters["method"] == "none"
+                    else native["preprocessed_support"][:, column]
+                )
+                masks["preprocessed_interpolated"][:, column] = native["preprocessed_interpolated"][:, column]
+                processors[name] = "belt_conditioning"
+                continue
             (
                 preprocessed[:, column],
                 masks["preprocessed_support"][:, column],
@@ -177,7 +205,7 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
                 masks["artifact"][:, column],
                 masks["interpolated"][:, column],
                 recording.fs_hz,
-                detrend_parameters,
+                parameters,
                 filtering,
             )
             processors[name] = "belt_conditioning"
@@ -195,9 +223,18 @@ def detrend_and_filter_recording(corrected, recording, settings, masks):
                 else "unselected_passthrough"
             )
     masks["preprocessed_valid"] = masks["eligible"] & masks["preprocessed_support"]
+    methods = {parameters["method"] for parameters in per_channel.values()}
+    detrend = {
+        key: value for key, value in next(iter(per_channel.values()), {}).items()
+        if key != "runs"
+    }
+    detrend["method"] = next(iter(methods)) if len(methods) == 1 else "mixed"
+    if not methods:
+        detrend["method"] = "none"
+    detrend["per_channel"] = per_channel
     return preprocessed, {
         "channel_processors": processors,
-        "detrend": detrend_parameters,
+        "detrend": detrend,
         "filtering": filter_details,
         "processing_skips": processing_skips,
     }, detrended

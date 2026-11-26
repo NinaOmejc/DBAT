@@ -53,8 +53,14 @@ polyorder = 3  # Savitzky-Golay polynomial degree; must be nonnegative and small
 
 # Optional slow-drift detrending
 [preprocessing.detrend]
-method = "none"  # none | moving_detrend | robust_median; filtering is configured separately; none avoids repeating external DeTr_Norm preprocessing.
+method = "none"  # none | moving_detrend | robust_median; fallback when no per-belt setting/QC decision exists; filtering is configured separately.
 window_sec = 60.0  # Window for the selected detrending method; moving_detrend uses an odd native-sample window, robust_median uses one-second median blocks.
+transition_sec = 25.0  # Robust-median correction fade after each unchanged half-window edge; shortened for short finite segments.
+
+# Independent belt baseline defaults; accepted QC decisions override these settings
+[preprocessing.detrend.baseline_correction]
+"Resp-Lungs" = false  # Off by default; true applies robust_median using window_sec, including in GUI-disabled processing.
+"Resp-Diaphragm" = false  # Independent robust_median default; the GUI stores each accepted Off/On choice in qc.json.
 
 # Optional native-grid Butterworth filtering (SciPy SOS; fourth order per pass)
 [preprocessing.filtering.highpass]

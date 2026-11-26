@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import numpy as np
 
+from ..config import BELTS
+
 QC_SCHEMA = "dbat_qc_v2"
 READABLE_QC_SCHEMAS = {"dbat_qc_v1", QC_SCHEMA}
 RATINGS = ("unassessed", "usable", "weak", "unavailable")
@@ -207,6 +209,10 @@ def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
                 raise ValueError("QC interval IDs must be nonempty and unique")
             identifiers.add(interval["id"])
             has_evidence = True
+    baseline = qc.get("baseline_correction", {})
+    if (not isinstance(baseline, dict) or not set(baseline) <= set(BELTS)
+            or any(type(value) is not bool for value in baseline.values())):
+        raise ValueError("QC baseline_correction must map respiratory belt names to booleans")
     decision = qc.get("polarity")
     if decision is not None:
         if "choice" not in decision or decision["choice"] not in (
