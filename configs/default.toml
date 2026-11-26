@@ -114,4 +114,4 @@ preview_duration_sec = 60.0  # Inspection preview duration in seconds.
 source = "matlab"  # matlab loads saved landmarks; python detects on the final preproc_signal; both open the same peak/trough editor.
 matlab_results_dir = "D:/Projects/MAGMA/data_analysis/statistical_labeling"  # MATLAB cache root containing SubN_MN/SubN_MN_features.mat; used only for source=matlab.
 output_dir = "../outputs/peak_detection"  # Separate immutable HDF5 landmark revisions; preprocessing runs and qc.json are unchanged.
-window_sec = 0.0  # Initial peak-editor view in seconds; 0 shows the full recording; a positive value starts zoomed in.
+window_sec = 600.0  # Initial peak-editor view in seconds (default 600); 0 shows the full recording.

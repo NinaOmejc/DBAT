@@ -133,7 +133,10 @@ Set `[peak_detection].source` to `"matlab"` (default) or `"python"`; both paths 
 one maximized editor adapted from the existing MAGMA-ml/MATLAB landmark GUI.
 It supports click-to-add/remove peaks, selecting/moving/resetting troughs,
 synchronized zoom/pan/scroll, common/independent amplitude scaling, and seconds
-or samples for the window. `window_sec = 0` starts on the full recording.
+or samples for the window. The peak editor starts with `window_sec = 600.0`;
+**Previous/Next** move both panels by the current window and stop at recording
+boundaries. `window_sec = 0` shows the full recording. Preprocessing QC retains
+its independent full-recording default.
 `qc.review_again = true` reopens already accepted preprocessing QC. With
 `qc.open_gui = true`, saved QC without inspected intervals also reopens so that
 Save/Done can record the inspected view.

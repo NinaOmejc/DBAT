@@ -89,7 +89,7 @@ def _display_samples(x, first, stop, budget=6000):
 class LandmarkEditor:
     """Two synchronized belt panels, exact input-grid edits and bounded rendering."""
 
-    def __init__(self, annotation, output_dir=None, *, window_sec=0, reviewer=None):
+    def __init__(self, annotation, output_dir=None, *, window_sec=600, reviewer=None):
         import matplotlib.pyplot as plt
         from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider, TextBox
 
@@ -175,6 +175,10 @@ class LandmarkEditor:
         self.save.on_clicked(self._save)
         self.cancel_button = Button(self.figure.add_axes([0.9, 0.17, 0.08, 0.05]), "Cancel")
         self.cancel_button.on_clicked(self._cancel)
+        self.previous_button = Button(self.figure.add_axes([0.74, 0.105, 0.115, 0.04]), "Previous")
+        self.previous_button.on_clicked(lambda _: self._scroll_to(self.axes[0].get_xlim()[0] - self.window))
+        self.next_button = Button(self.figure.add_axes([0.865, 0.105, 0.115, 0.04]), "Next")
+        self.next_button.on_clicked(lambda _: self._scroll_to(self.axes[0].get_xlim()[0] + self.window))
         self.slider = Slider(
             self.figure.add_axes([0.12, 0.045, 0.80, 0.025]),
             "Start (s)",
@@ -400,7 +404,7 @@ class LandmarkEditor:
             self.session.cancel()
 
 
-def run_peak_check_gui(annotation, output_dir=None, *, window_sec=0, reviewer=None):
+def run_peak_check_gui(annotation, output_dir=None, *, window_sec=600, reviewer=None):
     """Open a blocking native GUI with isolated unsaved edits.
 
     Parameters
@@ -410,7 +414,7 @@ def run_peak_check_gui(annotation, output_dir=None, *, window_sec=0, reviewer=No
     output_dir : path-like, optional
         Publish a separate revision here when review is accepted.
     window_sec : float
-        Initial visible duration in seconds; zero opens the full recording.
+        Initial visible duration in seconds (default 600); zero opens the full recording.
     reviewer : str, optional
         Reviewer identity, defaulting to the local user.
 
