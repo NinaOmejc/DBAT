@@ -56,6 +56,7 @@ def _plot_indices(values, limit, full_detail=False):
 class ManualQCEditor:
     """Edit a private QC copy; only Save/Done returns accepted annotations.
 
+    Opens on the full recording when qc.window_length is zero (the default).
     Navigation renders a bounded viewport; <=10 s views retain every sample.
     Drag coordinates are converted directly to native samples, independently of drawing density.
     Explicitly confirming the visible window records coverage for all displayed
@@ -121,12 +122,14 @@ class ManualQCEditor:
         self.preview_error = None
         self.result = None
         self.start = 0
-        self.window = min(
-            recording.samples.shape[0],
-            window_samples(
-                self.settings["window_length"], self.settings["window_unit"], recording.fs_hz
-            ),
-        )
+        self.window = recording.samples.shape[0]
+        if self.settings["window_length"] != 0:
+            self.window = min(
+                self.window,
+                window_samples(
+                    self.settings["window_length"], self.settings["window_unit"], recording.fs_hz
+                ),
+            )
         self.display_mode = self.settings["display_mode"]
         if self.display_mode == "cleaned":
             self.display_mode = "preprocessed"
@@ -318,7 +321,10 @@ class ManualQCEditor:
         self.window_box = TextBox(
             self.figure.add_axes((0.62, 0.045, 0.10, 0.035)),
             self.settings["window_unit"],
-            initial=str(self.settings["window_length"]),
+            initial=str(
+                self.window if self.settings["window_unit"] == "samples"
+                else self.window / recording.fs_hz
+            ),
         )
         self.window_box.on_submit(self._set_window)
         self.figure.canvas.mpl_connect("button_press_event", self._remove_artifact)

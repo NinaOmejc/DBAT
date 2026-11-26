@@ -140,7 +140,10 @@ def _validate(config, directory):
         or len(set(qc_channels)) != len(qc_channels)
     ):
         raise ValueError("qc.channels must be a nonempty list of unique input channel names")
-    window_samples(qc["window_length"], qc["window_unit"], fs_hz)
+    if qc["window_unit"] not in {"seconds", "samples"}:
+        raise ValueError("qc.window_unit must be seconds or samples")
+    if isinstance(qc["window_length"], bool) or qc["window_length"] != 0:
+        window_samples(qc["window_length"], qc["window_unit"], fs_hz)
     if qc["display_mode"] == "cleaned":
         qc["display_mode"] = "preprocessed"
     if qc["display_mode"] not in {"original", "preprocessed", "preprocessed_original"}:
