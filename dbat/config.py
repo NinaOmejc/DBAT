@@ -80,6 +80,18 @@ def _validate_selection(selection):
 def _validate(config, directory):
     """Reject unsupported settings and inconsistent units before loading data."""
     _validate_selection(config["run"])
+    peaks = config["peak_detection"]
+    if peaks["source"] not in {"matlab", "python"}:
+        raise ValueError("peak_detection.source must be matlab or python")
+    if not isinstance(peaks["matlab_results_dir"], str) or not peaks["matlab_results_dir"]:
+        raise ValueError("peak_detection.matlab_results_dir must be a directory path")
+    peaks["matlab_results_dir"] = _resolve_path(peaks["matlab_results_dir"], directory)
+    if not isinstance(peaks["output_dir"], str) or not peaks["output_dir"]:
+        raise ValueError("peak_detection.output_dir must be a directory path")
+    peaks["output_dir"] = _resolve_path(peaks["output_dir"], directory)
+    duration = peaks["window_sec"]
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
+        raise ValueError("peak_detection.window_sec must be finite and nonnegative")
     verbosity = config["run"]["verbosity"]
     if type(verbosity) is not int or verbosity not in (0, 1, 2):
         raise ValueError("run.verbosity must be 0 (silent), 1 (progress), or 2 (detailed)")

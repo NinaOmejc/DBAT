@@ -112,28 +112,52 @@ lungs = landmarks["belts"]["Resp-Lungs"]
 The same function accepts an in-memory `PreprocessedRecording`. It reads only the
 saved `preproc_signal` waveform, `processed_fs_hz` and processed-grid masks; it never
 smooths again or assumes 200 Hz after resampling. Peaks/troughs remain zero-based
-on that exact grid. Finite landmarks remain numerical evidence even on unreviewed
-or artifact-invalid support; analytical breath/IBI masks and reasons remain false
-there. Candidate/retained/removed peaks, prominences, reasons, waveform hashes,
+on that exact grid. Invalid/unreviewed samples and unavailable channels cannot
+retain peaks or troughs. A peak pair spanning invalid support has a missing trough and invalid IBI;
+manual edits cannot insert landmarks into that support. Automatic/imported
+originals remain audit evidence, separate from editable landmarks. Candidates,
+retained/removed peaks, prominences, reasons, waveform hashes,
 trough overrides and manual peak edits are retained. Numerical move/reset/edit
-functions are available for the later landmark GUI. The peak checker covers those
+functions are reused by the peak editor. The peak checker covers those
 operations, disabled QC, amplitudes/RR, missing data and processed-grid timing;
 `--h5` also checks a real saved recording read-only and verifies its file hash.
-For a read-only real-recording comparison, run:
+Run normal preprocessing/QC followed by peak/trough editing:
 
 ```powershell
 .\venv\Scripts\python.exe scripts/test_resp_peak_loading.py
 ```
 
-Edit the subject/measurement in its final `main()` call (default Sub100_M1).
-The script preprocesses in memory using available QC, then loads retained peaks
-and their detection waveform from the MATLAB `*_features.mat` cache. It converts
-one-based indices, validates recording metadata and rejects resampled grids.
-Markers stay on the MATLAB waveform; differences in DBAT preprocessing/polarity
-are reported. No QC is accepted and no results or MATLAB files are written.
+The script uses `[run]` subjects, measurements and exclusions, opens preprocessing
+QC according to `[qc]`, saves the normal immutable run and verifies its arrays/QC.
+Set `[peak_detection].source` to `"matlab"` (default) or `"python"`; both paths open
+one maximized editor adapted from the existing MAGMA-ml/MATLAB landmark GUI.
+It supports click-to-add/remove peaks, selecting/moving/resetting troughs,
+synchronized zoom/pan/scroll, common/independent amplitude scaling, and seconds
+or samples for the window. `window_sec = 0` starts on the full recording.
+`qc.review_again = true` reopens already accepted preprocessing QC.
 
-DBAT's landmark review GUI and validated historical MATLAB import remain later
-integration work; this comparison does not recompute features or labels.
+**Reviewed / Save** writes a new immutable HDF5 landmark revision under
+`peak_detection.output_dir` (default `outputs/peak_detection/SubN_MN/`). **Cancel**
+or closing the window discards unsaved peak edits; the previously saved
+preprocessing run and its `qc.json` stay unchanged. Edits retain source hashes,
+preprocessing/QC provenance, masks, original imported evidence, reviewer/time and
+manual edit history. Downstream outputs are marked stale; no extra analysis runs.
+
+`dbat.peak_detection.load_matlab_peaks(mat_path, preprocessed=None)` is the reusable
+loader for standard MATLAB `*_features.mat` files. It returns the same core
+structure as `detect_preprocessed()`, converts one-based indices and preserves
+saved troughs/overrides and automatic-QC evidence. The optional DBAT result checks
+identity and exact native-grid compatibility and supplies the final waveform and
+QC masks. Invalid peaks are removed and troughs never bridge invalid regions.
+Changed waveforms are reported for review; incompatible polarity is rejected.
+Standalone loading preserves cached waveforms with only finite-data support and
+requires review; it does not establish DBAT preprocessing QC. Import provenance
+records the cache path/hash and lack of a raw-source hash. MATLAB files are never
+modified. `load_landmarks(path)` reads a saved DBAT landmark revision.
+
+The older `check_peak_detection.py` still asserts the previous policy of keeping
+landmarks outside QC support. Those checks were left unchanged; they do not match
+this stricter QC policy. No automated test files were added or modified.
 
 ## Development setup
 

@@ -177,7 +177,7 @@ def _support_reason(belt, left, right):
         reasons.append("nonfinite")
     if belt["artifact_mask"][section].any():
         reasons.append("confirmed_artifact")
-    if belt["uncertain_mask"][section].any():
+    if not belt["sample_valid"][section].all() or belt["uncertain_mask"][section].any():
         reasons.append("uncertain_support")
     if belt["channel_status"] == "unavailable":
         reasons.append("channel_unavailable")
@@ -191,7 +191,9 @@ def _dependency_hash(belt, fs):
             "utf-8"
         )
     )
-    for key in ("detection_waveform", "peak_idx", "trough_idx", "artifact_mask", "uncertain_mask"):
+    for key in (
+        "detection_waveform", "peak_idx", "trough_idx", "artifact_mask", "uncertain_mask", "sample_valid"
+    ):
         digest.update(waveform_hash(belt[key]).encode("ascii"))
     return digest.hexdigest()
 
@@ -199,10 +201,10 @@ def _dependency_hash(belt, fs):
 def recompute(belt, fs):
     """Derive breath fields in place; retain exact troughs for unchanged peak pairs.
 
-    Missing troughs occupy NaN slots. Confirmed artifacts, uncertainty and
-    nonfinite gaps invalidate analytical support, never existing positions.
-    Finite trough locations remain numerical evidence even on unreviewed or
-    artifact-flagged support; their analytical masks remain false.
+    QC-invalid peaks are removed. Missing troughs occupy NaN slots, including
+    peak pairs spanning artifacts, unreviewed support or nonfinite gaps.
+    Preserved/manual troughs survive only on unchanged, fully supported pairs.
+    Waveform samples and original automatic/imported evidence remain unchanged.
     Adapted from:
     https://github.com/NinaOmejc/magma-labeling/blob/a7081d2e87131bb05563431778ad10b2865296a7/src/feature_extraction/recompute_respiration_breath_fields.m
 
@@ -223,21 +225,25 @@ def recompute(belt, fs):
     peaks = _indices(belt["peak_idx"], x.size)
     if np.any(np.diff(peaks) <= 0):
         raise ValueError("Peak indices must be strictly increasing")
+    support = belt["sample_valid"] & ~belt["artifact_mask"] & np.isfinite(x)
+    peaks = peaks[:0] if belt["channel_status"] == "unavailable" else peaks[support[peaks]]
     n = peaks.size
     troughs = np.full(max(n - 1, 0), np.nan)
     reasons = []
     pairs = set(zip(peaks[:-1], peaks[1:], strict=True))
     for key in ("trough_overrides", "preserved_troughs"):
         belt[key] = np.asarray(
-            [row for row in belt[key] if tuple(row[:2]) in pairs], dtype=float
+            [row for row in belt[key]
+             if tuple(row[:2]) in pairs and not _support_reason(belt, int(row[0]), int(row[1]))],
+            dtype=float,
         ).reshape(-1, 3)
     pinned = {tuple(row[:2]): row[2] for row in belt["preserved_troughs"]}
     pinned.update({tuple(row[:2]): row[2] for row in belt["trough_overrides"]})
     for i, (left, right) in enumerate(zip(peaks[:-1], peaks[1:], strict=True)):
         reason = _support_reason(belt, left, right)
-        if (left, right) in pinned:
+        if not reason and (left, right) in pinned:
             troughs[i] = pinned[left, right]
-        elif right - left > 1 and np.isfinite(x[left : right + 1]).all():
+        elif not reason and right - left > 1:
             segment = x[left + 1 : right]
             if settings.trough_method == "min":
                 offset = np.argmin(segment)
@@ -325,6 +331,11 @@ def validate_belt(belt, fs):
     finite = np.isfinite(troughs)
     if np.any((troughs[finite] <= peaks[:-1][finite]) | (troughs[finite] >= peaks[1:][finite])):
         raise ValueError("Troughs must be strictly inside adjacent peak pairs")
+    if any(_support_reason(belt, int(peak), int(peak)) for peak in peaks):
+        raise ValueError("Peak lies in invalid preprocessing QC support")
+    if any(_support_reason(belt, int(left), int(right))
+           for left, right in zip(peaks[:-1][finite], peaks[1:][finite], strict=True)):
+        raise ValueError("Trough cannot bridge invalid preprocessing QC support")
     for key, indices in (("peak_t", peaks), ("trough_t", troughs)):
         if not np.allclose(belt[key], indices / fs, rtol=0, atol=1e-8, equal_nan=True):
             raise ValueError(f"{key} disagrees with zero-based indices and fs")
@@ -366,12 +377,16 @@ def edit_peak(belt, fs, time_sec, *, remove=None):
         if not np.isfinite(time_sec) or not 0 <= time_sec <= (len(x) - 1) / fs:
             raise ValueError("Click lies outside the recording")
         center = int(np.floor(time_sec * fs + 0.5))
+        if _support_reason(proposed, center, center):
+            raise ValueError("Cannot add a peak in invalid preprocessing QC support")
         radius = max(1, int(np.floor(fs + 0.5)))
         first, stop = max(0, center - radius), min(len(x), center + radius + 1)
         section = x[first:stop]
-        if not np.isfinite(section).any():
-            raise ValueError("No finite sample within one second of the click")
-        index = first + int(np.argmax(np.where(np.isfinite(section), section, -np.inf)))
+        supported = (np.isfinite(section) & proposed["sample_valid"][first:stop]
+                     & ~proposed["artifact_mask"][first:stop])
+        if not supported.any():
+            raise ValueError("No QC-valid sample within one second of the click")
+        index = first + int(np.argmax(np.where(supported, section, -np.inf)))
         guard = max(1, int(np.floor(proposed["settings"]["min_peak_dist_sec"] * fs / 4 + 0.5)))
         if peaks.size and np.min(np.abs(peaks - index)) <= guard:
             raise ValueError("Peak already exists or is too close to an existing peak")
@@ -396,6 +411,8 @@ def move_trough(belt, fs, left, right, time_sec=None, *, reset=False):
         rows = proposed[key]
         proposed[key] = rows[~((rows[:, 0] == left) & (rows[:, 1] == right))]
     if not reset:
+        if _support_reason(proposed, int(left), int(right)):
+            raise ValueError("Cannot move a trough across invalid preprocessing QC support")
         if time_sec is None or not np.isfinite(time_sec):
             raise ValueError("Provide a finite trough time in seconds")
         index = int(np.floor(time_sec * fs + 0.5))
@@ -427,6 +444,7 @@ def detect_belt(
     interpolated=None,
     source="array",
     channel_status="unknown",
+    landmarks=None,
 ):
     """Detect respiratory landmarks without applying another smoothing pass.
 
@@ -440,11 +458,15 @@ def detect_belt(
         Peak selection, conservative QC and trough/amplitude definitions.
     valid, artifact, interpolated : ndarray of bool, optional
         Independent analysis support, technical artifact and interpolation masks.
-        QC changes analytical support, while finite landmarks remain evidence.
+        Invalid/unreviewed samples and unavailable channels cannot retain peaks;
+        unsupported peak pairs have missing troughs. Source values stay unchanged.
     source : str
         Waveform provenance; standalone input defaults to "array".
     channel_status : str
         Recording-level reliability; "unavailable" disables analytical support.
+    landmarks : dict, optional
+        Validated imported automatic evidence, final peak/trough indices and
+        pair-anchored trough overrides. Skips peak detection and preserves troughs.
 
     Returns
     -------
@@ -466,7 +488,21 @@ def detect_belt(
         if mask.shape != x.shape or not np.isin(mask, [0, 1]).all():
             raise ValueError(f"{name} must be binary on the waveform's sample grid")
         masks[name] = mask.astype(bool).copy()
-    automatic = detect_peaks(x, fs_hz, settings)
+    if landmarks is None:
+        support = masks["sample_valid"] & ~masks["artifact_mask"] & np.isfinite(x)
+        if channel_status == "unavailable":
+            support[:] = False
+        automatic = detect_peaks(np.where(support, x, np.nan), fs_hz, settings)
+        peaks = automatic["retained_idx"].copy()
+        preserved_troughs, overrides = np.empty((0, 3)), np.empty((0, 3))
+    else:
+        automatic = copy.deepcopy(landmarks["automatic"])
+        peaks = _indices(landmarks["peak_idx"], x.size)
+        troughs = _indices(landmarks["trough_idx"], x.size, missing=True)
+        if len(troughs) != max(0, len(peaks) - 1):
+            raise ValueError("Imported troughs must align with adjacent peak pairs")
+        preserved_troughs = np.column_stack([peaks[:-1], peaks[1:], troughs])
+        overrides = np.asarray(landmarks["trough_overrides"], dtype=float).reshape(-1, 3)
     for name in ("candidate", "retained", "removed"):
         automatic[f"{name}_t"] = automatic[f"{name}_idx"] / fs_hz
     automatic["candidate_val"] = x[automatic["candidate_idx"]]
@@ -481,9 +517,9 @@ def detect_belt(
         "smoothing_applied_samples": 0,
         "channel_status": channel_status,
         "automatic": automatic,
-        "peak_idx": automatic["retained_idx"].copy(),
-        "trough_overrides": np.empty((0, 3)),
-        "preserved_troughs": np.empty((0, 3)),
+        "peak_idx": peaks,
+        "trough_overrides": overrides,
+        "preserved_troughs": preserved_troughs,
         "manual_peak_edits": [],
         "manual_trough_edits": [],
         "uncertain_mask": ~masks["sample_valid"] & ~masks["artifact_mask"],
@@ -539,7 +575,7 @@ def detect_preprocessed(data, settings=None):
         if np.asarray(masks[name]).shape != values.shape:
             raise ValueError(f"Processed {name} mask does not match the waveform grid")
     result = {
-        "algorithm_version": "dbat_respiratory_landmarks_v1",
+        "algorithm_version": "dbat_respiratory_landmarks_v2",
         "identity": copy.deepcopy(identity),
         "fs_hz": float(fs),
         "time_sec": time.copy(),
@@ -570,4 +606,5 @@ def detect_preprocessed(data, settings=None):
         )
     if not result["belts"]:
         raise ValueError("No respiratory belt columns were supplied")
+    result["preprocessing"]["qc"] = copy.deepcopy(qc)
     return result
