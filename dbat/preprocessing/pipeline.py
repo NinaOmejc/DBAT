@@ -387,7 +387,7 @@ def preprocess_recording(
 
 
 def run_preprocessing(recording, config):
-    """Load accepted QC, optionally review, then save a new immutable run.
+    """Load QC, optionally review incomplete coverage, then save a new immutable run.
 
     Returns (PreprocessedRecording, HDF5 path). Every invocation computes the
     current pipeline; no preprocessing cache or old-format reuse is performed.
@@ -396,12 +396,14 @@ def run_preprocessing(recording, config):
     """
     qc = load_latest_qc_annotations(recording, config)
     qc.pop("loaded_from_file", None)
+    reviewed = annotation_masks(qc, recording)["reviewed"]
+    qc_columns = [recording.channels.index(name) for name in config["qc"]["channels"]]
     review_again = config["qc"]["open_gui"] and config["qc"]["review_again"]
     prepared = prepare_recording(recording, config)
     decision = qc.get("polarity")
     needs_review = (
         not qc["accepted_at_utc"]
-        or not qc["reviewed_intervals"]
+        or not reviewed[:, qc_columns].all()
         or review_again
         or (decision and decision["preparation_signature"] != prepared["signature"])
         or (polarity_assessment_for_qc(prepared["polarity"], qc)["polarity_warning"] and not decision)

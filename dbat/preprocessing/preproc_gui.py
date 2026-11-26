@@ -63,7 +63,7 @@ class ManualQCEditor:
     Opens on the full recording when qc.window_length is zero (the default).
     Navigation renders a bounded viewport; <=10 s views retain every sample.
     Drag coordinates are converted directly to native samples, independently of drawing density.
-    Save/Done records inspected coverage for the visible window on all displayed
+    Save/Done records inspected coverage for the whole recording on all displayed
     channels; simply viewing or navigating never marks samples clean.
     """
 
@@ -156,7 +156,7 @@ class ManualQCEditor:
         )
         self.figure.suptitle(
             f"{recording.recording_id}: QC of final preprocessing\n"
-            "Left drag: artifact | Right click shading: remove | Save / Done: accept QC and inspected view",
+            "Left drag: artifact | Right click shading: remove | Save / Done: confirm the whole recording",
             fontsize=11,
         )
         self.original_lines = [
@@ -684,14 +684,14 @@ class ManualQCEditor:
                 self._refresh_preview()
                 return
 
-    def _confirm_visible(self, event):
-        """Record inspected coverage on displayed channels when Save/Done accepts the view."""
+    def _confirm_recording(self, event):
+        """Record full-length inspection on displayed QC channels, independently of zoom."""
         reviewer = self._reviewer_name()
         if reviewer:
             self.qc["reviewed_intervals"].append(
                 make_interval(
-                    self.start,
-                    self.start + self.window,
+                    0,
+                    self.recording.samples.shape[0],
                     self.channels,
                     self.recording.fs_hz,
                     reviewer,
@@ -886,7 +886,7 @@ class ManualQCEditor:
         self._message(message)
 
     def _save(self, event):
-        """Record the visible inspected interval and accept the private QC copy."""
+        """Confirm the whole recording and accept QC without changing exclusions or ratings."""
         import matplotlib.pyplot as plt
 
         reviewer = self._reviewer_name()
@@ -910,7 +910,7 @@ class ManualQCEditor:
                 "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
                 "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
             })
-        self._confirm_visible(event)
+        self._confirm_recording(event)
         self.qc["reviewer"] = reviewer
         self.qc["gui_settings"] = {
             "channels": list(self.channels),

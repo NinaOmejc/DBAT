@@ -138,8 +138,8 @@ or samples for the window. The peak editor starts with `window_sec = 600.0`;
 boundaries. `window_sec = 0` shows the full recording. Preprocessing QC retains
 its independent full-recording default.
 `qc.review_again = true` reopens already accepted preprocessing QC. With
-`qc.open_gui = true`, saved QC without inspected intervals also reopens so that
-Save/Done can record the inspected view.
+`qc.open_gui = true`, missing or partial inspected coverage on the configured
+QC channels also reopens review. Save/Done confirms the whole recording.
 
 **Reviewed / Save** writes a new immutable HDF5 landmark revision under
 `peak_detection.output_dir` (default `outputs/peak_detection/SubN_MN/`). **Cancel**
@@ -404,12 +404,11 @@ timestamps are saved separately from the manual QC evidence.
   are normalized only in the GUI's private copy; previous saved files stay intact.
   Merging preserves the same excluded samples. A physiological sigh is not a
   technical artifact.
-- **Save / Done** records the visible interval as inspected on the configured
-  plots, then accepts QC; there is no separate coverage-confirmation button.
-  Fully zoomed out, Save covers the whole recording. When zoomed in, it adds only
-  the current view, retaining previously saved coverage. Hidden channels receive
-  no new review evidence. Navigation alone records no inspection, and channel
-  ratings/artifact exclusions still determine which inspected samples are valid.
+- **Save / Done** confirms the whole recording as inspected on the configured
+  QC channels, independently of zoom or the current viewport. There is no separate
+  coverage-confirmation button. Existing artifacts and unavailable-channel ratings
+  remain excluded from validity. Hidden channels receive no new review evidence.
+  Navigation alone records no inspection.
 - **Waveform view** has three radio choices: **Original** (unchanged `.dat`),
   **Preprocessed** (the actual final `preproc_signal` alone),
   and **Preprocessed + Original** (default; the identical final signal in strong
@@ -440,12 +439,12 @@ timestamps are saved separately from the manual QC evidence.
   **None** under a red warning, check **Keep None despite warning** before Save.
   Its choices are visible and active only while the dropdown is open.
   Saved compatible choices reload; Cancel discards all session changes.
-- **Save / Done** records inspected coverage and accepts the edit copy, then
-  immediately writes a new QC JSON before conditioning. With no artifacts the
-  result is `reviewed_clean`; with artifacts it is `reviewed_with_artifacts`.
-  Clean status may describe partial coverage; per-channel coverage and
-  `fully_reviewed` remain explicit. **Cancel/X** discards this session and records
-  no new inspection or files, preserving any earlier accepted review.
+- **Save / Done** records full-length inspected coverage and accepts the edit
+  copy, then immediately writes a new QC JSON before conditioning. With no
+  artifacts the result is `reviewed_clean`; with artifacts it is
+  `reviewed_with_artifacts`. Per-channel coverage and `fully_reviewed` remain
+  explicit. **Cancel/X** discards this session and records no new inspection or
+  files, preserving any earlier accepted review.
 
 ## Signal hierarchy and the single respiratory input
 
