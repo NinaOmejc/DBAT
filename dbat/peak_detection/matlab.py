@@ -149,13 +149,16 @@ def load_matlab_peaks(path, preprocessed=None):
                     "%s: MATLAB waveform differs from DBAT; imported positions need review on the DBAT waveform",
                     channel,
                 )
-        # Cache v9 omits the thoracic flip flag; MATLAB treats it as false.
+        # MATLAB cached_logical treats missing optional polarity flags as false:
+        # https://github.com/NinaOmejc/magma-labeling/blob/main/src/utils/align_respiration_to_feature_cache.m
         relative = (
             meta.get("thoracic_polarity_flipped", False)
             if key == "lungs"
             else meta["diaphragm_polarity_flipped"]
         )
-        import_info["polarity_flipped"][channel] = bool(relative) ^ bool(meta["absolute_polarity_flipped"])
+        import_info["polarity_flipped"][channel] = bool(relative) ^ bool(
+            meta.get("absolute_polarity_flipped", False)
+        )
         if (
             preprocessed is not None
             and support["channel_status"] != "unavailable"
