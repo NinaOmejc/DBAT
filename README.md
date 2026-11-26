@@ -119,8 +119,21 @@ trough overrides and manual peak edits are retained. Numerical move/reset/edit
 functions are available for the later landmark GUI. The peak checker covers those
 operations, disabled QC, amplitudes/RR, missing data and processed-grid timing;
 `--h5` also checks a real saved recording read-only and verifies its file hash.
-DBAT's landmark review GUI and historical MATLAB import remain later integration
-work; this stage does not recompute downstream features or labels.
+For a read-only real-recording comparison, run:
+
+```powershell
+.\venv\Scripts\python.exe scripts/test_resp_peak_loading.py
+```
+
+Edit the subject/measurement in its final `main()` call (default Sub100_M1).
+The script preprocesses in memory using available QC, then loads retained peaks
+and their detection waveform from the MATLAB `*_features.mat` cache. It converts
+one-based indices, validates recording metadata and rejects resampled grids.
+Markers stay on the MATLAB waveform; differences in DBAT preprocessing/polarity
+are reported. No QC is accepted and no results or MATLAB files are written.
+
+DBAT's landmark review GUI and validated historical MATLAB import remain later
+integration work; this comparison does not recompute features or labels.
 
 ## Development setup
 
