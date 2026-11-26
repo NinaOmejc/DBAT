@@ -401,6 +401,7 @@ def run_preprocessing(recording, config):
     decision = qc.get("polarity")
     needs_review = (
         not qc["accepted_at_utc"]
+        or not qc["reviewed_intervals"]
         or review_again
         or (decision and decision["preparation_signature"] != prepared["signature"])
         or (polarity_assessment_for_qc(prepared["polarity"], qc)["polarity_warning"] and not decision)

@@ -63,7 +63,7 @@ class ManualQCEditor:
     Opens on the full recording when qc.window_length is zero (the default).
     Navigation renders a bounded viewport; <=10 s views retain every sample.
     Drag coordinates are converted directly to native samples, independently of drawing density.
-    Explicitly confirming the visible window records coverage for all displayed
+    Save/Done records inspected coverage for the visible window on all displayed
     channels; simply viewing or navigating never marks samples clean.
     """
 
@@ -156,7 +156,7 @@ class ManualQCEditor:
         )
         self.figure.suptitle(
             f"{recording.recording_id}: QC of final preprocessing\n"
-            "Left drag: artifact | Right click shading: remove | Confirm visible: inspected coverage",
+            "Left drag: artifact | Right click shading: remove | Save / Done: accept QC and inspected view",
             fontsize=11,
         )
         self.original_lines = [
@@ -278,7 +278,6 @@ class ManualQCEditor:
             else 1,
         )
         self.scope.ax.set_title("Manual drag scope", loc="left", fontsize=8, pad=0, y=0.88)
-        self._button((0.79, 0.250, 0.19, 0.035), "Confirm visible", self._confirm_visible)
         self.display_modes = RadioButtons(
             self.figure.add_axes((0.79, 0.150, 0.19, 0.09)),
             DISPLAY_LABELS,
@@ -375,7 +374,7 @@ class ManualQCEditor:
         reviewer = self.reviewer.text.strip()
         if not reviewer:
             self._message(
-                "Enter a reviewer before annotating, rating, confirming coverage, or saving."
+                "Enter a reviewer before annotating, rating, or saving."
             )
         return reviewer
 
@@ -686,7 +685,7 @@ class ManualQCEditor:
                 return
 
     def _confirm_visible(self, event):
-        """Explicitly confirm inspected coverage only on the displayed QC channels."""
+        """Record inspected coverage on displayed channels when Save/Done accepts the view."""
         reviewer = self._reviewer_name()
         if reviewer:
             self.qc["reviewed_intervals"].append(
@@ -887,7 +886,7 @@ class ManualQCEditor:
         self._message(message)
 
     def _save(self, event):
-        """Accept the private edit copy; zero artifacts still needs explicit coverage."""
+        """Record the visible inspected interval and accept the private QC copy."""
         import matplotlib.pyplot as plt
 
         reviewer = self._reviewer_name()
@@ -911,6 +910,7 @@ class ManualQCEditor:
                 "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
                 "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
             })
+        self._confirm_visible(event)
         self.qc["reviewer"] = reviewer
         self.qc["gui_settings"] = {
             "channels": list(self.channels),
