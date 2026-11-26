@@ -20,14 +20,15 @@ from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
-ALGORITHM_VERSION = "dbat_auto_cleaning_v4"
+ALGORITHM_VERSION = "dbat_auto_cleaning_v5"
+BELT_RESIDUAL_WINDOWS_SEC = (0.4, 1.2)
 BELT_MORPHOLOGY = {
     "context_sec": 2.0,
     "minimum_flank_sec": 0.25,
     "slope_guard_sec": 0.05,
     "respiratory_min_width_sec": 0.35,
     "respiratory_max_residual_fraction": 0.3,
-    "spike_max_width_sec": 0.1,
+    "spike_max_width_sec": 0.25,
     "spike_min_slope_ratio": 4.0,
 }
 
@@ -35,7 +36,7 @@ BELT_MORPHOLOGY = {
 ABRUPT_EXCURSION = {
     "estimation_sigma_sec": 0.02,
     "prominence_window_sec": 10.0,
-    "duration_sec": [0.25, 4.0],
+    "duration_sec": [0.25, 6.0],
     "support_rel_height": 0.9,
     "context_sec": 15.0,
     "context_guard_sec": 0.5,
@@ -44,7 +45,7 @@ ABRUPT_EXCURSION = {
     "amplitude_span_multiplier": 1.5,
     "slope_percentile_multiplier": 4.0,
     "slope_mad_multiplier": 6.0,
-    "min_normalized_slope_per_sec": 3.0,
+    "min_normalized_slope_per_sec": 2.5,
 }
 
 
@@ -203,8 +204,10 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
     """Interpolate only brief residual spikes with finite, compatible flanks.
 
     Returns corrected values, interpolation/candidate masks, events and detector
-    parameters. Single-channel width, prominence and slopes protect plausible
-    broad respiratory extrema; uncertain shapes remain candidates. Optional
+    parameters. The 0.4/1.2 s medians have separate recording-wide thresholds;
+    either can seed a candidate. Morphology uses the strongest normalized
+    residual at each sample. Single-channel width, prominence and slopes protect
+    plausible broad respiratory extrema; uncertain shapes remain candidates. Optional
     paired peaks remain protected. Baseline-displacement detection is absent;
     detrending owns baseline correction. Detection is adapted from the supplied
     test_cleaning.py; the fixed flank lag is replaced with 0.25 * fs_hz.
@@ -219,11 +222,24 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
     if finite.sum() < 2 or len(values) <= lag:
         return corrected, interpolated, candidates, events, info
     safe = _estimation_signal(values)
-    residual = safe - median_filter(safe, size=odd_samples(0.40, fs_hz), mode="nearest")
-    threshold = max(
-        10 * robust_scale(residual), 4 * np.percentile(np.abs(residual), 99), 1e-10
-    )
-    seeds = finite & (np.abs(residual) > threshold)
+    residuals, thresholds, references = [], [], []
+    for seconds in BELT_RESIDUAL_WINDOWS_SEC:
+        window = odd_samples(seconds, fs_hz)
+        current = safe - median_filter(safe, size=window, mode="nearest")
+        threshold = max(
+            10 * robust_scale(current), 4 * np.percentile(np.abs(current), 99), 1e-10
+        )
+        residuals.append(current)
+        thresholds.append(threshold)
+        references.append({
+            "window_sec": seconds, "window_samples": window,
+            "residual_threshold": float(threshold),
+        })
+    residuals = np.asarray(residuals)
+    strength = np.abs(residuals) / np.asarray(thresholds)[:, None]
+    strongest = np.argmax(strength, axis=0)
+    residual = residuals[strongest, np.arange(len(values))]
+    seeds = finite & np.any(strength > 1, axis=0)
     initial = binary_dilation(seeds, iterations=max(1, round(0.035 * fs_hz))) & finite
     groups = []
     for start, end in continuous_runs(initial):
@@ -233,7 +249,7 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
             groups.append((start, end))
     typical_change = np.percentile(np.abs(safe[lag:] - safe[:-lag]), 95)
     flank_limit = max(
-        3 * np.percentile(np.abs(residual), 95), 2 * typical_change, 1e-10
+        3 * np.percentile(np.abs(residuals[0]), 95), 2 * typical_change, 1e-10
     )
     for start, end in groups:
         morphology = None
@@ -263,23 +279,30 @@ def preprocess_belt_artifacts(values, fs_hz, paired_times, maximum_sec):
             event = _event(start, end, fs_hz, "review_candidate", reason)
         if morphology is not None:
             event["morphology"] = morphology
+        event["detection_windows_sec"] = [
+            seconds for seconds, current, threshold in zip(
+                BELT_RESIDUAL_WINDOWS_SEC, residuals, thresholds, strict=True
+            ) if np.any(np.abs(current[start:end]) > threshold)
+        ]
         events.append(event)
     candidates &= finite & ~interpolated
     info = {
         "status": "assessed",
-        "residual_threshold": float(threshold),
+        "residual_threshold": float(thresholds[0]),  # Existing 0.4 s field.
+        "median_references": references,
         "flank_limit": float(flank_limit),
     }
     return corrected, interpolated, candidates, events, info
 
 
 def abrupt_excursion_candidates(values, fs_hz):
-    """Flag unusually large, fast excursions in either sign without modifying values.
+    """Flag abrupt recovered downward or upward-downward excursions for review.
 
     Parameters
     ----------
     values : ndarray, shape (native_samples,)
         Automatically corrected belt values; only finite runs are assessed.
+        Negative direction refers to source polarity, before manual belt inversion.
     fs_hz : float
         Native frequency in Hz. A temporary 20 ms Gaussian estimate is used only
         for morphology; local 90%-prominence widths bound transient excursions.
@@ -288,8 +311,11 @@ def abrupt_excursion_candidates(values, fs_hz):
     -------
     tuple
         Native Boolean candidate mask, review-only events with local thresholds,
-        and assessment info. Smooth broad breaths and long baseline changes are
-        not flagged on amplitude alone. No interpolation or exclusion is applied.
+        and assessment info. A trough below the local reference must have
+        finite bases returning to that reference and an abrupt falling slope.
+        A preceding large, abrupt upward lobe identifies the biphasic pattern.
+        Isolated upward breaths/sighs are not movement candidates. No interpolation
+        or exclusion is applied.
         Width/prominence use SciPy:
         https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.find_peaks.html
     """
@@ -312,59 +338,91 @@ def abrupt_excursion_candidates(values, fs_hz):
             mode="nearest",
         )
         slopes = np.diff(estimate) * fs_hz
-        for sign in (1, -1):
-            peaks, properties = find_peaks(
-                sign * estimate,
-                prominence=1e-10,
-                width=np.asarray(parameters["duration_sec"]) * fs_hz,
-                wlen=odd_samples(parameters["prominence_window_sec"], fs_hz),
-                rel_height=parameters["support_rel_height"],
+        peaks, properties = find_peaks(
+            -estimate,
+            prominence=1e-10,
+            width=np.asarray(parameters["duration_sec"]) * fs_hz,
+            wlen=odd_samples(parameters["prominence_window_sec"], fs_hz),
+            rel_height=parameters["support_rel_height"],
+        )
+        for index, peak in enumerate(peaks):
+            start = int(np.floor(properties["left_ips"][index]))
+            end = int(np.ceil(properties["right_ips"][index])) + 1
+            amplitude = float(properties["prominences"][index])
+            slope = float(np.max(abs(slopes[start : end - 1])))
+            normalized_slope = slope / amplitude
+            if normalized_slope < parameters["min_normalized_slope_per_sec"]:
+                continue
+            first, last = max(0, start - context), min(len(estimate), end + context)
+            if start - guard - first < minimum or last - end - guard < minimum:
+                continue
+            reference = np.r_[
+                estimate[first : start - guard], estimate[end + guard : last]
+            ]
+            reference_slopes = np.r_[
+                slopes[first : start - guard], slopes[end + guard : last - 1]
+            ]
+            amplitude_limit = max(
+                parameters["amplitude_mad_multiplier"] * robust_scale(reference),
+                parameters["amplitude_span_multiplier"]
+                * np.ptp(np.percentile(reference, [10, 90])),
+                1e-10,
             )
-            for index, peak in enumerate(peaks):
-                start = int(np.floor(properties["left_ips"][index]))
-                end = int(np.ceil(properties["right_ips"][index])) + 1
-                amplitude = float(properties["prominences"][index])
-                slope = float(np.max(abs(slopes[start : end - 1])))
-                normalized_slope = slope / amplitude
-                if normalized_slope < parameters["min_normalized_slope_per_sec"]:
-                    continue
-                first, last = max(0, start - context), min(len(estimate), end + context)
-                if start - guard - first < minimum or last - end - guard < minimum:
-                    continue
-                reference = np.r_[
-                    estimate[first : start - guard], estimate[end + guard : last]
-                ]
-                reference_slopes = np.r_[
-                    slopes[first : start - guard], slopes[end + guard : last - 1]
-                ]
-                amplitude_limit = max(
-                    parameters["amplitude_mad_multiplier"] * robust_scale(reference),
-                    parameters["amplitude_span_multiplier"]
-                    * np.ptp(np.percentile(reference, [10, 90])),
-                    1e-10,
-                )
-                slope_limit = max(
-                    parameters["slope_percentile_multiplier"]
-                    * np.percentile(abs(reference_slopes), 95),
-                    parameters["slope_mad_multiplier"] * robust_scale(reference_slopes),
-                    1e-10,
-                )
-                if amplitude <= amplitude_limit or slope <= slope_limit:
-                    continue
-                lo, hi = int(run_start + start), int(run_start + end)
-                mask[lo:hi] = True
-                event = _event(lo, hi, fs_hz, "review_candidate", "abrupt_excursion")
-                event["morphology"] = {
-                    "sign": sign,
-                    "peak_sample": int(run_start + peak),
-                    "amplitude": amplitude,
-                    "amplitude_limit": float(amplitude_limit),
-                    "max_slope_per_sec": slope,
-                    "slope_limit_per_sec": float(slope_limit),
-                    "normalized_slope_per_sec": normalized_slope,
-                    "duration_sec": float(properties["widths"][index] / fs_hz),
-                }
-                events.append(event)
+            slope_limit = max(
+                parameters["slope_percentile_multiplier"]
+                * np.percentile(abs(reference_slopes), 95),
+                parameters["slope_mad_multiplier"] * robust_scale(reference_slopes),
+                1e-10,
+            )
+            if amplitude <= amplitude_limit or slope <= slope_limit:
+                continue
+            reference_level = float(np.median(reference))
+            left_base = int(properties["left_bases"][index])
+            right_base = int(properties["right_bases"][index])
+            depth = reference_level - float(estimate[peak])
+            falling_slope = float(-np.min(slopes[start:peak]))
+            # Require a recovered dip below the reference, rather than a notch
+            # that stays above baseline within a large upward breath.
+            if (
+                depth <= 0
+                or estimate[left_base] < reference_level
+                or estimate[right_base] < reference_level
+                or falling_slope <= slope_limit
+            ):
+                continue
+            pattern = "downward_with_recovery"
+            upward_amplitude = float(estimate[left_base] - reference_level)
+            if upward_amplitude > amplitude_limit:
+                first_up = max(0, left_base - round(parameters["duration_sec"][1] * fs_hz))
+                crossings = np.flatnonzero(estimate[first_up:left_base] <= reference_level)
+                if len(crossings):
+                    onset = int(first_up + crossings[-1])
+                    if (
+                        (end - onset) / fs_hz <= parameters["duration_sec"][1]
+                        and np.max(slopes[onset:left_base]) > slope_limit
+                    ):
+                        start = onset
+                        pattern = "upward_downward"
+            lo, hi = int(run_start + start), int(run_start + end)
+            mask[lo:hi] = True
+            event = _event(lo, hi, fs_hz, "review_candidate", "abrupt_excursion")
+            event["morphology"] = {
+                "sign": -1,
+                "pattern": pattern,
+                "reference_level": reference_level,
+                "downward_depth": depth,
+                "falling_slope_per_sec": falling_slope,
+                "preceding_upward_amplitude": upward_amplitude,
+                "pattern_duration_sec": (end - start) / fs_hz,
+                "peak_sample": int(run_start + peak),
+                "amplitude": amplitude,
+                "amplitude_limit": float(amplitude_limit),
+                "max_slope_per_sec": slope,
+                "slope_limit_per_sec": float(slope_limit),
+                "normalized_slope_per_sec": normalized_slope,
+                "duration_sec": float(properties["widths"][index] / fs_hz),
+            }
+            events.append(event)
     return (
         mask,
         events,
@@ -583,14 +641,20 @@ def clean_recording(recording, config):
         channel_info[name] = info
         events.extend({"channel": name, **event} for event in detected)
     parameters = {
-        "belt_residual_window_sec": 0.40,
+        "belt_residual_window_sec": BELT_RESIDUAL_WINDOWS_SEC[0],
+        "belt_residual_windows_sec": list(BELT_RESIDUAL_WINDOWS_SEC),
         "belt_mad_multiplier": 10,
         "belt_abs_p99_multiplier": 4,
         "belt_dilation_sec": 0.035,
         "belt_group_gap_sec": 0.6,
         "belt_flank_lag_sec": 0.25,
         "belt_morphology": dict(BELT_MORPHOLOGY),
-        "abrupt_excursions": dict(ABRUPT_EXCURSION),
+        "abrupt_excursions": {
+            **ABRUPT_EXCURSION,
+            "patterns": ["downward_with_recovery", "upward_downward"],
+            "direction_basis": "source polarity before manual inversion",
+            "recovery_policy": "trough below local median; both prominence bases reach that median",
+        },
         "paired_gaussian_sigma_sec": 0.10,
         "paired_baseline_sec": 20,
         "paired_width_sec": [0.6, 8],

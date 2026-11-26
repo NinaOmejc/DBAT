@@ -83,7 +83,7 @@ kaiser_beta = 5.0  # Kaiser window parameter for the anti-alias FIR; SciPy's def
 [preprocessing.artifacts]
 paired_breath_protection = false  # Optional paired-peak interpolation safeguard; synchronization is not physiological evidence.
 automatic_detection = true  # Detect/correct obvious belt and SpO2 glitches before manual QC; automatic candidates are advisory.
-belt_max_interpolation_sec = 0.25  # Maximum reconstructed belt interval in seconds; longer candidates remain unchanged.
+belt_max_interpolation_sec = 0.5  # Maximum reconstructed belt interval in seconds; longer candidates remain unchanged.
 spo2_units = "percent"  # Explicit input-unit declaration: percent | unknown; percentage-range checks must also pass before correction.
 spo2_change_threshold_pp = 8.0  # Minimum abrupt SpO2 change in percentage points within approximately 0.15 seconds.
 spo2_return_tolerance_pp = 2.0  # Maximum difference from the pre-artifact SpO2 level, in percentage points.

@@ -228,11 +228,13 @@ one smoothing pass, then calculates review-only quality and MAE. The GUI reviews
 that actual final provisional waveform. Accepted QC is preserved before final
 recomputation and saving. ECG/BP do not receive belt correction or quality metrics.
 
-`preprocessing.artifacts` enables conservative early cleaning. Its 0.40 s median
-residual, spike threshold, 0.035 s dilation and 0.6 s grouping are unchanged. Only
-finite, compatible, bounded spikes lasting at most `belt_max_interpolation_sec`
-(default/cap 0.25 s) are interpolated. Ambiguous events remain numerical and are
-flagged for review. **Sustained baseline-displacement detection is removed** from
+`preprocessing.artifacts` enables conservative early cleaning. Both 0.4 s and
+1.2 s moving-median residuals are checked, each against its own unchanged threshold:
+max(10 scaled MAD, 4 times P99 absolute residual). Either reference can seed a
+candidate; morphology uses the strongest threshold-normalized residual. The
+0.035 s dilation and 0.6 s grouping remain unchanged. Only finite, compatible,
+bounded spikes lasting at most `belt_max_interpolation_sec` (default/cap 0.5 s)
+are interpolated. Ambiguous events remain numerical and are flagged for review. **Sustained baseline-displacement detection is removed** from
 this stage; baseline correction belongs only to `detrending.py`.
 
 Before interpolation, a single-channel morphology safeguard measures local
@@ -240,24 +242,36 @@ half-prominence peak width, prominence, median-residual fraction and slope
 abruptness in up to 2 s of finite context on either side. Broad, smooth extrema
 (width >=0.35 s, residual <=30% of prominence, slope ratio <4) are preserved as
 plausible respiratory peaks. Interpolation additionally requires a narrow extremum
-(width <=0.10 s), slopes at least four times the surrounding 95th-percentile slope,
+(width <=0.25 s), slopes at least four times the surrounding 95th-percentile slope,
 and prominence at least the residual amplitude. Uncertain morphology or inadequate
 finite context remains unchanged and flagged. Both signs are checked; belt
 synchronization is unnecessary. These are conservative technical safeguards,
 not breath/sigh labels. Numeric evidence and parameters are saved in provenance.
 
-A separate `abrupt_excursion_candidates()` pass detects large, rapid excursions
-of either sign **for review only**, after existing spike correction. A temporary
-20 ms Gaussian estimate measures local prominence in a 10 s neighbourhood and
-90%-prominence durations of 0.25–4 s. Each side supplies at least 4 s of finite
-reference data, drawn from up to 15 s with a 0.5 s guard. Prominence must exceed
-both four scaled MADs and 1.5 times the reference P90–P10 span; peak slope must
-exceed both four times reference P95 absolute slope and six scaled MADs. The
-maximum slope/prominence must also be at least 3/s, preserving smooth broad
-excursions from amplitude-only warnings. Gaps split assessment; no filling is
-used. All settings, signs, native bounds and actual local thresholds are saved
-under automatic-cleaning provenance. These are review heuristics, not breath or
-sigh classifications. This pass never changes samples, interpolation or validity.
+The existing `abrupt_excursion_candidates()` pass now flags only recovered
+**downward** and **upward-downward biphasic** excursions, after short-spike
+correction. It uses a temporary 20 ms Gaussian estimate, local prominence in a
+10 s neighbourhood, and 90%-prominence widths of 0.25-6 s. Each side supplies at
+least 4 s of finite reference data, drawn from up to 15 s with a 0.5 s guard.
+Prominence must exceed both four scaled MADs and 1.5 times the reference P90-P10
+span; maximum slope must exceed both four times reference P95 absolute slope and
+six scaled MADs. Maximum slope/prominence must be at least 2.5/s.
+
+To exclude isolated upward breaths/sighs, a candidate must also descend below the
+reference median, have an abrupt falling slope exceeding the local slope limit,
+and recover to the reference median at both prominence bases. A preceding upward lobe is labelled biphasic only if its
+height and rising slope exceed those same limits and the combined interval is
+at most 6 s. Direction refers to source polarity before manual belt inversion.
+Genuine missing gaps split assessment. These are movement-like review heuristics,
+not physiological classifications. **This pass only produces orange advisory
+shading; it never interpolates, excludes samples, or changes validity.**
+
+Both median references and thresholds, morphology/pattern evidence, native
+bounds, local limits and algorithm version are recorded in automatic-cleaning
+provenance. The existing 0.4 s scalar threshold field is retained alongside the
+new per-reference diagnostics. Existing QC/run schemas remain readable. Broad
+sighs can retain their existing short-detector `plausible_respiratory_peak`
+advisories without being classified as movement.
 
 `paired_breath_protection = false` is the default. Enabling it retains the existing
 paired-peak safeguard (0.6–8 s widths, centres within 1.5 s) solely to prevent

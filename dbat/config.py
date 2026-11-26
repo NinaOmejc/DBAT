@@ -264,8 +264,8 @@ def _validate(config, directory):
             raise ValueError(f"artifacts.{name} must be a positive finite number")
     if artifacts["spo2_return_tolerance_pp"] >= artifacts["spo2_change_threshold_pp"]:
         raise ValueError("SpO2 return tolerance must be smaller than the change threshold")
-    if artifacts["belt_max_interpolation_sec"] > 0.25:
-        raise ValueError("Belt interpolation is restricted to at most 0.25 seconds")
+    if artifacts["belt_max_interpolation_sec"] > 0.5:
+        raise ValueError("Belt interpolation is restricted to at most 0.5 seconds")
     if output["schema_version"] != RESULT_SCHEMA or output["overwrite"] is not False:
         raise ValueError("Use dbat_preprocessing_v5 and output.overwrite=false (versioned saves)")
     try:
