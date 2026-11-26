@@ -398,12 +398,17 @@ def run_preprocessing(recording, config):
     qc.pop("loaded_from_file", None)
     reviewed = annotation_masks(qc, recording)["reviewed"]
     qc_columns = [recording.channels.index(name) for name in config["qc"]["channels"]]
+    needs_initial_rating = config["qc"]["initial_rating"] != "unassessed" and any(
+        qc["channel_ratings"][name] == "unassessed" and not qc["rating_provenance"].get(name)
+        for name in config["qc"]["channels"]
+    )
     review_again = config["qc"]["open_gui"] and config["qc"]["review_again"]
     prepared = prepare_recording(recording, config)
     decision = qc.get("polarity")
     needs_review = (
         not qc["accepted_at_utc"]
         or not reviewed[:, qc_columns].all()
+        or needs_initial_rating
         or review_again
         or (decision and decision["preparation_signature"] != prepared["signature"])
         or (polarity_assessment_for_qc(prepared["polarity"], qc)["polarity_warning"] and not decision)

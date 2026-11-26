@@ -164,8 +164,8 @@ def _validate(config, directory):
         raise ValueError("qc.scale_mode must be shared or independent")
     if qc["artifact_scope"] not in {"both_belts", "selected_channel"}:
         raise ValueError("qc.artifact_scope must be both_belts or selected_channel")
-    if qc["initial_rating"] != "unassessed":
-        raise ValueError("qc.initial_rating must be unassessed; ratings require explicit review")
+    if qc["initial_rating"] not in {"usable", "unassessed"}:
+        raise ValueError("qc.initial_rating must be usable or unassessed; Save/Done confirms defaults")
     if not isinstance(qc["reviewer"], str):
         raise ValueError("qc.reviewer must be text")
     annotation_files = qc.setdefault("annotation_files", {})

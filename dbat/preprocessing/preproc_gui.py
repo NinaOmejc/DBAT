@@ -83,6 +83,12 @@ class ManualQCEditor:
             else new_qc_annotations(recording)
         )
         validate_qc_annotations(self.qc, recording)
+        self.pending_default_ratings = {
+            name: self.settings["initial_rating"] for name in self.channels
+            if self.qc["channel_ratings"][name] == "unassessed"
+            and not self.qc["rating_provenance"].get(name)
+            and self.settings["initial_rating"] != "unassessed"
+        }
         merge_artifact_intervals(self.qc, recording.fs_hz, self.qc["reviewer"])
         self.prepared = prepare_recording(recording, config) if prepared is None else prepared
         if self.prepared["identity"] != recording_identity(recording):
@@ -443,6 +449,7 @@ class ManualQCEditor:
         reviewer = self._reviewer_name()
         if not reviewer:
             return
+        self.pending_default_ratings.pop(name, None)
         old = self.qc["channel_ratings"][name]
         provenance = {"reviewer": reviewer, "created_at_utc": utc_now(), "source": "dbat_manual_qc"}
         self.qc["channel_ratings"][name] = rating
@@ -811,7 +818,8 @@ class ManualQCEditor:
             low, high = limits[name]
             margin = 0.05 * (high - low) if high > low else max(0.1, abs(low) * 0.05)
             axis.set_ylim(low - margin, high + margin)
-            axis.set_ylabel(f"{name}\n{self.qc['channel_ratings'][name]}", fontsize=8)
+            display_rating = self.pending_default_ratings.get(name, self.qc["channel_ratings"][name])
+            axis.set_ylabel(f"{name}\n{display_rating}", fontsize=8)
             axis.grid(alpha=0.2)
         for mode, label in zip(DISPLAY_MODES, self.display_modes.labels, strict=True):
             label.set_color("tab:blue" if mode == self.display_mode else "black")
@@ -823,7 +831,7 @@ class ManualQCEditor:
             label.set_fontweight("bold" if mode == self.scale_mode else "normal")
         for name, buttons in self.rating_buttons.items():
             for rating, button in buttons.items():
-                active = self.qc["channel_ratings"][name] == rating
+                active = self.pending_default_ratings.get(name, self.qc["channel_ratings"][name]) == rating
                 button.color = "tab:blue" if active else "0.95"
                 button.hovercolor = "tab:blue" if active else "0.85"
                 button.ax.set_facecolor(button.color)
@@ -910,6 +918,8 @@ class ManualQCEditor:
                 "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
                 "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
             })
+        for name, rating in list(self.pending_default_ratings.items()):
+            self._set_rating(name, rating)
         self._confirm_recording(event)
         self.qc["reviewer"] = reviewer
         self.qc["gui_settings"] = {

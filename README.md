@@ -388,10 +388,14 @@ timestamps are saved separately from the manual QC evidence.
 - The GUI opens maximized to the current monitor's available screen area on the
   standard Windows Tk/Qt/wx backends. Normal window controls remain available.
 - Enter a reviewer. **Rate individual channels** shows one row per displayed
-  channel, with all four ratings visible. Click `usable`, `weak`, `unavailable` or
-  `unassessed` directly in that row; the current choice is highlighted. Opening
-  the GUI preserves saved ratings and creates no new rating evidence. These are
-  technical ratings, never a clinical minimal-excursion assessment.
+  channel, with all four ratings visible. Unrated channels start with **Usable**
+  preselected (`qc.initial_rating = "usable"`; `"unassessed"` remains optional).
+  Click `usable`, `weak`, `unavailable` or `unassessed` to change the highlighted
+  choice. Explicit saved ratings are preserved, including Unavailable and Weak.
+  Save/Done confirms pending defaults with reviewer/time provenance; opening or
+  cancelling the GUI creates no accepted rating evidence. Reviews with unrated
+  channels reopen when GUI review is enabled. Hidden channels receive no defaults.
+  These are technical ratings, never a clinical minimal-excursion assessment.
 - Left-drag on a belt in **Both belts** mode to mark both belts. **Dragged channel**
   marks only the subplot receiving the drag, including SpO2. Red shading is an
   artifact. Overlapping intervals merge per channel into one red region and one
