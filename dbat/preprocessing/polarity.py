@@ -144,6 +144,17 @@ def assess_relative_belt_polarity(values, channels, fs_hz, reliable, enabled):
     return result
 
 
+def polarity_assessment_for_qc(assessment, qc):
+    """Suppress paired diagnostics when either belt is unavailable; keep raw evidence."""
+    unavailable = [name for name in BELTS if qc["channel_ratings"][name] == "unavailable"]
+    if not unavailable:
+        return assessment
+    return {
+        **assessment, "status": "not_assessed", "reason": "unavailable_belt",
+        "polarity_warning": False, "unavailable_channels": unavailable,
+    }
+
+
 def saved_polarity_decision(qc, prepared):
     """Return a source/cleaning-compatible accepted choice, or reject a stale choice."""
     decision = qc.get("polarity")
@@ -169,6 +180,8 @@ def apply_polarity(values, channels, choice):
 def assessment_text(assessment):
     """Format a neutral or assessed diagnostic; only complete warning criteria are red."""
     if assessment["status"] == "not_assessed":
+        if assessment.get("reason") == "unavailable_belt":
+            return "Polarity not assessed: unavailable belt"
         return "Not assessed"
     if assessment["status"] != "assessed":
         return "Insufficient reliable data"
@@ -198,7 +211,8 @@ def orient_prepared(prepared, qc, channels, *, provisional=False):
         decision = saved_polarity_decision(qc, prepared)
     choice = decision["choice"] if decision else None
     if (
-        not provisional and prepared["polarity"]["polarity_warning"]
+        not provisional
+        and polarity_assessment_for_qc(prepared["polarity"], qc)["polarity_warning"]
         and choice is None
         and not (decision and decision["acknowledged_warning"])
     ):

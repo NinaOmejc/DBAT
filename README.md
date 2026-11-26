@@ -474,6 +474,15 @@ claimed to be untouched sensor data.
 
 ## Numerical values, processing support and QC
 
+Rating a channel **Unavailable** removes its active early/noise warnings, window
+flags, saved warning masks and mirrored warnings on the paired belt. Other
+channels retain their own warnings. If either belt is unavailable, paired-polarity
+warnings and their acknowledgement requirement are disabled. Numerical waveforms,
+quality measurements, interpolation evidence and manual annotations are retained.
+Changing the rating back restores warnings from the in-memory numerical cache;
+ratings do not rerun conditioning or signal-quality calculations. Saved run
+provenance records the suppressed channels and contains only active warning flags.
+
 Conditioning depends on `preprocessing.channels`, never the channel rating,
 `qc.channels`, or reviewed coverage. An unreviewed recording receives the same
 numerical conditioning as a reviewed recording with the same baseline/artifact/polarity

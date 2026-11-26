@@ -16,6 +16,7 @@ import numpy as np
 from .. import __version__
 from ..config import BELTS, RESULT_SCHEMA
 from ..logging import logger
+from ..preprocessing.polarity import polarity_assessment_for_qc
 from ..preprocessing.annotations import (
     annotation_masks,
     continuous_runs,
@@ -26,7 +27,7 @@ from ..preprocessing.annotations import (
 )
 
 
-PREPROCESSING_ALGORITHM = "dbat_preprocessing_v9"
+PREPROCESSING_ALGORITHM = "dbat_preprocessing_v10"
 
 
 @dataclass(frozen=True)
@@ -531,6 +532,27 @@ def preprocessing_provenance(result, config, prepared, decision):
     processing_skips = diagnostics["processing_skips"]
     processed_fs, times = result.processed_fs_hz, result.processed_time_sec
     choice = decision["choice"] if decision else None
+    unavailable = {
+        name for name, rating in result.qc["channel_ratings"].items()
+        if rating == "unavailable"
+    }
+    automatic = {
+        "signature": prepared["signature"], **prepared["provenance"],
+        "candidates": [
+            item for item in prepared["candidates"] if item["channel"] not in unavailable
+        ],
+        "events": [
+            item for item in prepared["provenance"]["events"]
+            if item["action"] != "review_candidate" or item["channel"] not in unavailable
+        ],
+        "suppressed_warning_channels": sorted(unavailable),
+        "channels": dict(prepared["provenance"]["channels"]),
+    }
+    for name in unavailable:
+        info = {**automatic["channels"][name], "warnings_suppressed": True}
+        if "abrupt_excursions" in info:
+            info["abrupt_excursions"] = {**info["abrupt_excursions"], "event_count": 0}
+        automatic["channels"][name] = info
     provenance = {
         "algorithm_version": PREPROCESSING_ALGORITHM,
         "enabled": settings["enabled"],
@@ -563,10 +585,10 @@ def preprocessing_provenance(result, config, prepared, decision):
         and np.array_equal(times, recording.time_sec),
         "native_landmark_policy": "Require exact native-grid equality before direct historical MATLAB index reuse; otherwise reject direct reuse",
         "matlab_difference": "All respiratory reference and spectral inputs use smoothed; MATLAB also uses unsmoothed recordings for some calculations",
-        "quality_policy": "Only selected QC channels with explicitly inspected support and usable ratings are eligible",
-        "automatic_cleaning": {"signature": prepared["signature"], **prepared["provenance"]},
+        "quality_policy": "Only selected QC channels with explicitly inspected support and usable ratings are eligible; unavailable channels suppress automatic warnings and paired polarity diagnostics",
+        "automatic_cleaning": automatic,
         "polarity": {
-            "assessment": prepared["polarity"],
+            "assessment": polarity_assessment_for_qc(prepared["polarity"], result.qc),
             "decision": decision,
             "applied_to": choice,
         },

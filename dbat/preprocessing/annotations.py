@@ -234,6 +234,7 @@ def validate_qc_annotations(qc, recording, *, allow_unaccepted=False):
         if (
             not allow_unaccepted
             and assessment.get("polarity_warning")
+            and all(ratings[name] != "unavailable" for name in BELTS)
             and decision["choice"] is None
             and not decision["acknowledged_warning"]
         ):
@@ -298,7 +299,7 @@ def active_candidate_resolutions(qc, prepared, candidates=None):
 
 
 def review_candidates(qc, prepared, quality):
-    """Combine current stage warnings and retained reviewer evidence snapshots."""
+    """Combine active warnings/snapshots, excluding unavailable source channels."""
     candidates = {
         item["id"]: item for item in prepared["candidates"] + quality["candidates"]
     }
@@ -314,7 +315,13 @@ def review_candidates(qc, prepared, quality):
             == signatures[candidate["source_stage"]]
         ):
             candidates.setdefault(candidate["id"], candidate)
-    return sorted(candidates.values(), key=lambda item: (item["start_sample"], item["channel"], item["source_stage"]))
+    return sorted(
+        (
+            item for item in candidates.values()
+            if qc["channel_ratings"][item["channel"]] != "unavailable"
+        ),
+        key=lambda item: (item["start_sample"], item["channel"], item["source_stage"]),
+    )
 
 
 def unresolved_candidate_mask(
@@ -325,7 +332,11 @@ def unresolved_candidate_mask(
     active = active_candidate_resolutions(qc, prepared, candidates)
     unresolved = np.zeros(prepared["corrected"].shape, dtype=bool)
     for candidate in candidates:
-        if candidate["source_stage"] == source_stage and candidate["id"] not in active:
+        if (
+            candidate["source_stage"] == source_stage
+            and candidate["id"] not in active
+            and qc["channel_ratings"][candidate["channel"]] != "unavailable"
+        ):
             column = prepared["identity"]["channels"].index(candidate["channel"])
             unresolved[candidate["start_sample"] : candidate["end_sample"], column] = (
                 True
@@ -338,9 +349,16 @@ def add_analysis_masks(masks, corrected, recording, qc, selected_channels, autom
 
     Updates masks in place. Corrected samples have shape (native_samples,
     channels); quality selection, coverage, ratings and artifacts remain
-    independent of numerical conditioning.
+    independent of numerical conditioning. Unavailable channels suppress warning
+    masks while retaining actual interpolation evidence and numerical values.
     """
     masks.update(automatic_masks)
+    warnings_enabled = np.array([
+        qc["channel_ratings"][name] != "unavailable" for name in recording.channels
+    ])
+    for name in ("auto_candidate", "unresolved_candidate"):
+        if name in masks:
+            masks[name] = masks[name] & warnings_enabled[None, :]
     masks["finite"] = np.isfinite(corrected)
     usable = np.array([qc["channel_ratings"][name] == "usable" for name in recording.channels])
     unknown = np.array(

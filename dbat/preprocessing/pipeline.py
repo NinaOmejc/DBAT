@@ -28,10 +28,10 @@ from .annotations import (
 from .cleaning import prepare_recording
 from .detrending import detrending_parameters
 from .filtering import detrend_and_filter_recording, filtering_support
-from .polarity import apply_polarity, orient_prepared
+from .polarity import apply_polarity, orient_prepared, polarity_assessment_for_qc
 from .resampling import resample_preprocessed, resample_masks
 from .smoothing import smooth_recording, smoothing_masks
-from .signal_quality import assess_signal_quality
+from .signal_quality import assess_signal_quality, signal_quality_for_qc
 from .impact import preprocessing_impact
 
 
@@ -51,6 +51,7 @@ class PreprocessedRecording:
     native_conditioning_masks: dict  # In-memory GUI support only; never written to HDF5.
     native_preprocessed: np.ndarray  # Preview cache only; no intermediate waveforms are saved.
     native_detrended: np.ndarray
+    numerical_signal_quality: dict  # Raw warning evidence for reversible QC edits only.
 
     @property
     def original(self):
@@ -212,10 +213,11 @@ def refresh_qc_masks(result, config, qc, prepared):
                 diagnostics["smoothing"],
             )
     masks["finite"] = processed_finite & np.isfinite(result.preproc_signal)
+    quality = signal_quality_for_qc(result.numerical_signal_quality, qc)
     _add_noise_masks(
-        masks, recording, qc, prepared, result.signal_quality, result.processed_time_sec
+        masks, recording, qc, prepared, quality, result.processed_time_sec
     )
-    updated = replace(result, qc=qc, masks=masks)
+    updated = replace(result, qc=qc, masks=masks, signal_quality=quality)
     updated.provenance = preprocessing_provenance(updated, config, prepared, decision)
     updated.provenance.update(
         provisional=True,
@@ -330,15 +332,16 @@ def preprocess_recording(
     numerical_signature = hashlib.sha256(
         json.dumps(channel_signatures, sort_keys=True).encode()
     ).hexdigest()
-    quality = assess_signal_quality(
+    numerical_quality = assess_signal_quality(
         recording,
         corrected,
         smoothed,
         processed_fs,
         settings["signal_quality"],
         numerical_signature,
-        previous=previous.signal_quality if previous else None, changed=changed,
+        previous=previous.numerical_signal_quality if previous else None, changed=changed,
     )
+    quality = signal_quality_for_qc(numerical_quality, qc)
     _add_noise_masks(masks, recording, qc, prepared, quality, times)
     result = PreprocessedRecording(
         recording,
@@ -353,6 +356,7 @@ def preprocess_recording(
         native_conditioning_masks,
         native_preprocessed,
         detrended,
+        numerical_quality,
     )
     result.provenance = preprocessing_provenance(result, config, prepared, decision)
     result.provenance["provisional"] = provisional
@@ -399,7 +403,7 @@ def run_preprocessing(recording, config):
         not qc["accepted_at_utc"]
         or review_again
         or (decision and decision["preparation_signature"] != prepared["signature"])
-        or (prepared["polarity"]["polarity_warning"] and not decision)
+        or (polarity_assessment_for_qc(prepared["polarity"], qc)["polarity_warning"] and not decision)
     )
     if config["qc"]["open_gui"] and needs_review:
         from .preproc_gui import run_qc_gui

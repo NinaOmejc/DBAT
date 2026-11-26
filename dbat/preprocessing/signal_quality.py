@@ -438,3 +438,29 @@ def assess_signal_quality(
         source_stage="signal_quality",
     )
     return result
+
+
+def signal_quality_for_qc(quality, qc):
+    """Return active quality flags without mutating cached numerical evidence.
+
+    Unavailable channels retain their metrics, but have no warning candidates,
+    window flags or active flagged fraction. Re-rating can reuse the raw cache.
+    """
+    unavailable = {
+        name for name in quality["channels"]
+        if qc["channel_ratings"][name] == "unavailable"
+    }
+    if not unavailable:
+        return quality
+    active = deepcopy(quality)
+    active["candidates"] = [
+        item for item in active["candidates"] if item["channel"] not in unavailable
+    ]
+    for row in active["windows"]:
+        if row["channel"] in unavailable:
+            row.update(flagged=False, reasons=[])
+    for name in unavailable:
+        active["channels"][name].update(
+            warnings_suppressed=True, flagged_window_fraction=None
+        )
+    return active

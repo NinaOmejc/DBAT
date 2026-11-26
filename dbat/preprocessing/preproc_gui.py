@@ -18,13 +18,17 @@ from .annotations import (
     new_qc_annotations,
     recording_identity,
     review_status,
+    review_candidates,
     utc_now,
     validate_qc_annotations,
 )
 from .cleaning import prepare_recording
 from .detrending import detrending_parameters
 from .pipeline import preprocess_recording, numerical_input_signature, refresh_qc_masks
-from .polarity import POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text
+from .polarity import (
+    POLARITY_CHOICES, POLARITY_LABELS, apply_polarity, assessment_text,
+    polarity_assessment_for_qc,
+)
 
 DISPLAY_MODES = ("original", "preprocessed", "preprocessed_original")
 DISPLAY_LABELS = ("Original", "Preprocessed", "Preprocessed + Original")
@@ -225,8 +229,9 @@ class ManualQCEditor:
             self.polarity_menu.ax.set_visible(False)
             self.polarity_menu.active = False
             self.polarity_menu.on_clicked(self._select_polarity)
-            diagnostic = assessment_text(self.prepared["polarity"])
-            if self.previous_polarity_stale:
+            assessment = polarity_assessment_for_qc(self.prepared["polarity"], self.qc)
+            diagnostic = assessment_text(assessment)
+            if self.previous_polarity_stale and assessment.get("reason") != "unavailable_belt":
                 diagnostic += "\nPrevious choice needs review: cleaning changed"
             self.polarity_diagnostic = self.figure.text(
                 0.09,
@@ -234,7 +239,7 @@ class ManualQCEditor:
                 diagnostic,
                 va="top",
                 fontsize=7.5,
-                color="red" if self.prepared["polarity"]["polarity_warning"] else "black",
+                color="red" if assessment["polarity_warning"] else "black",
             )
             self.polarity_ack = CheckButtons(
                 self.figure.add_axes((0.79, 0.477, 0.19, 0.025)),
@@ -477,7 +482,7 @@ class ManualQCEditor:
             "created_at_utc": utc_now(),
             "source": "dbat_manual_qc",
             "preparation_signature": self.prepared["signature"],
-            "assessment": deepcopy(self.prepared["polarity"]),
+            "assessment": deepcopy(polarity_assessment_for_qc(self.prepared["polarity"], self.qc)),
         }
         self.previous_polarity_stale = False
         return True
@@ -561,21 +566,26 @@ class ManualQCEditor:
         self._draw()
 
     def _cache_intervals(self):
-        """Index interval unions only when annotations or automatic evidence change."""
+        """Index active intervals when ratings, annotations or warning evidence change."""
         quality = self.preview.signal_quality if self.preview is not None else None
         manual = tuple(
             (field, item["start_sample"], item["end_sample"], tuple(item["channels"]))
             for field in ("reviewed_intervals", "artifacts")
             for item in self.qc[field]
         )
-        key = (id(quality), manual)
+        key = (id(quality), manual, tuple(self.qc["channel_ratings"].items()))
         if key == self._interval_key:
             return
         self._interval_key = key
         self._intervals = {}
-        candidates = self.prepared["candidates"] + (
-            quality["candidates"] if quality else []
+        candidates = review_candidates(
+            self.qc, self.prepared, quality or {"candidates": []}
         )
+        warning_ranges = {}
+        for item in candidates:
+            warning_ranges.setdefault((item["channel"], item["source_stage"]), []).append(
+                (item["start_sample"], item["end_sample"])
+            )
         self._candidate_ranges = [
             (item["start_sample"], item["end_sample"])
             for item in candidates
@@ -583,46 +593,19 @@ class ManualQCEditor:
             or (item["channel"] in BELTS and self.belt_channels)
         ]
         for name, column in zip(self.channels, self.columns, strict=True):
+            other = (
+                next((belt for belt in BELTS if belt != name), None)
+                if name in BELTS else None
+            )
             groups = {
                 "interpolated": list(
                     continuous_runs(self.prepared["masks"]["interpolated"][:, column])
                 ),
-                "early": list(
-                    continuous_runs(self.prepared["masks"]["auto_candidate"][:, column])
-                ),
-                "noise": [
-                    (item["start_sample"], item["end_sample"])
-                    for item in quality["candidates"]
-                    if item["channel"] == name
-                ]
-                if quality
-                else [],
+                "early": warning_ranges.get((name, "early_cleaning"), []),
+                "noise": warning_ranges.get((name, "signal_quality"), []),
+                "early_other": warning_ranges.get((other, "early_cleaning"), []),
+                "noise_other": warning_ranges.get((other, "signal_quality"), []),
             }
-            other = (
-                next((belt for belt in BELTS if belt != name), None)
-                if name in BELTS
-                else None
-            )
-            groups["early_other"] = (
-                list(
-                    continuous_runs(
-                        self.prepared["masks"]["auto_candidate"][
-                            :, self.recording.channels.index(other)
-                        ]
-                    )
-                )
-                if other
-                else []
-            )
-            groups["noise_other"] = (
-                [
-                    (item["start_sample"], item["end_sample"])
-                    for item in quality["candidates"]
-                    if item["channel"] == other
-                ]
-                if other and quality
-                else []
-            )
             for field in ("reviewed_intervals", "artifacts"):
                 groups[field] = [
                     (item["start_sample"], item["end_sample"])
@@ -858,19 +841,23 @@ class ManualQCEditor:
                 )
                 button.label.set_fontweight("bold" if selected else "normal")
         if self.polarity_enabled:
+            assessment = polarity_assessment_for_qc(self.prepared["polarity"], self.qc)
             acknowledge = (
-                self.prepared["polarity"]["polarity_warning"]
+                assessment["polarity_warning"]
                 and self.polarity_choice is None
             )
             self.polarity_ack.active = acknowledge
             self.polarity_ack.ax.set_visible(acknowledge)
-            diagnostic = assessment_text(self.prepared["polarity"])
-            unresolved_polarity = self.previous_polarity_stale or (
+            diagnostic = assessment_text(assessment)
+            unresolved_polarity = (
+                self.previous_polarity_stale and assessment.get("reason") != "unavailable_belt"
+            ) or (
                 acknowledge and not self.polarity_ack.get_status()[0]
             )
             if unresolved_polarity:
                 diagnostic += "\nPolarity unresolved: unflipped preview"
             self.polarity_diagnostic.set_text(diagnostic)
+            self.polarity_diagnostic.set_color("red" if assessment["polarity_warning"] else "black")
         self.lines[0].set_label(
             {
                 "original": "Original",
@@ -908,7 +895,8 @@ class ManualQCEditor:
             return
         if self.polarity_enabled:
             acknowledged = bool(self.polarity_ack.get_status()[0])
-            if self.prepared["polarity"]["polarity_warning"] and self.polarity_choice is None and not acknowledged:
+            assessment = polarity_assessment_for_qc(self.prepared["polarity"], self.qc)
+            if assessment["polarity_warning"] and self.polarity_choice is None and not acknowledged:
                 self._message("Check polarity: select a belt to invert, or acknowledge keeping None before Save / Done.")
                 return
             timestamp = utc_now()
@@ -917,7 +905,7 @@ class ManualQCEditor:
                 "choice": self.polarity_choice, "acknowledged_warning": acknowledged,
                 "reviewer": reviewer, "created_at_utc": timestamp, "source": "dbat_manual_qc",
                 "preparation_signature": self.prepared["signature"],
-                "assessment": deepcopy(self.prepared["polarity"]),
+                "assessment": deepcopy(polarity_assessment_for_qc(self.prepared["polarity"], self.qc)),
             }
             self.qc["edit_history"].append({
                 "action": "set_polarity", "old": previous_choice, "new": self.polarity_choice,
