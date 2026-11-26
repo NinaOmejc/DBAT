@@ -20,7 +20,7 @@ from .polarity import assess_relative_belt_polarity
 
 BELT_SOURCE_SHA256 = "4e066170f49fa51fbbe0629b3edfb79a8c4f3c1b24dbcbeb9ce9c6acc0ad7328"
 SPO2_SOURCE_SHA256 = "e5596768f8835634fafb4388edf53af89ae91040530e5693b28c9bafc3bf5968"
-ALGORITHM_VERSION = "dbat_auto_cleaning_v5"
+ALGORITHM_VERSION = "dbat_auto_cleaning_v6"
 BELT_RESIDUAL_WINDOWS_SEC = (0.4, 1.2)
 BELT_MORPHOLOGY = {
     "context_sec": 2.0,
@@ -43,8 +43,11 @@ ABRUPT_EXCURSION = {
     "minimum_reference_sec": 4.0,
     "amplitude_mad_multiplier": 4.0,
     "amplitude_span_multiplier": 1.5,
+    # Preserve strict upward-lobe limits; relax only downward-triggered review.
     "slope_percentile_multiplier": 4.0,
     "slope_mad_multiplier": 6.0,
+    "downward_slope_percentile_multiplier": 1.25,
+    "downward_slope_mad_multiplier": 3.0,
     "min_normalized_slope_per_sec": 2.5,
 }
 
@@ -313,7 +316,8 @@ def abrupt_excursion_candidates(values, fs_hz):
         Native Boolean candidate mask, review-only events with local thresholds,
         and assessment info. A trough below the local reference must have
         finite bases returning to that reference and an abrupt falling slope.
-        A preceding large, abrupt upward lobe identifies the biphasic pattern.
+        A preceding upward lobe retains the stricter slope limits. A qualifying
+        downward leg and its overshoot/return share one review interval (<=6 s).
         Isolated upward breaths/sighs are not movement candidates. No interpolation
         or exclusion is applied.
         Width/prominence use SciPy:
@@ -362,16 +366,22 @@ def abrupt_excursion_candidates(values, fs_hz):
             reference_slopes = np.r_[
                 slopes[first : start - guard], slopes[end + guard : last - 1]
             ]
+            reference_quantiles = np.percentile(reference, [10, 90])
             amplitude_limit = max(
                 parameters["amplitude_mad_multiplier"] * robust_scale(reference),
-                parameters["amplitude_span_multiplier"]
-                * np.ptp(np.percentile(reference, [10, 90])),
+                parameters["amplitude_span_multiplier"] * np.ptp(reference_quantiles),
                 1e-10,
             )
+            reference_slope_p95 = float(np.percentile(abs(reference_slopes), 95))
+            reference_slope_mad = float(robust_scale(reference_slopes))
             slope_limit = max(
-                parameters["slope_percentile_multiplier"]
-                * np.percentile(abs(reference_slopes), 95),
-                parameters["slope_mad_multiplier"] * robust_scale(reference_slopes),
+                parameters["downward_slope_percentile_multiplier"] * reference_slope_p95,
+                parameters["downward_slope_mad_multiplier"] * reference_slope_mad,
+                1e-10,
+            )
+            upward_slope_limit = max(
+                parameters["slope_percentile_multiplier"] * reference_slope_p95,
+                parameters["slope_mad_multiplier"] * reference_slope_mad,
                 1e-10,
             )
             if amplitude <= amplitude_limit or slope <= slope_limit:
@@ -399,10 +409,30 @@ def abrupt_excursion_candidates(values, fs_hz):
                     onset = int(first_up + crossings[-1])
                     if (
                         (end - onset) / fs_hz <= parameters["duration_sec"][1]
-                        and np.max(slopes[onset:left_base]) > slope_limit
+                        and np.max(slopes[onset:left_base]) > upward_slope_limit
                     ):
                         start = onset
                         pattern = "upward_downward"
+            rebound_peak = None
+            # Once the downward leg qualifies, include its upward overshoot and
+            # return in the same warning; no independent upward-spike test.
+            if estimate[right_base] > reference_quantiles[1]:
+                crossings = np.flatnonzero(estimate[left_base:peak] >= reference_level)
+                if len(crossings):
+                    downward_start = int(left_base + crossings[-1])
+                    pair_start = start if pattern == "upward_downward" else downward_start
+                    pair_limit = min(
+                        len(estimate),
+                        pair_start + round(parameters["duration_sec"][1] * fs_hz),
+                    )
+                    returns = np.flatnonzero(
+                        estimate[right_base + 1 : pair_limit] <= reference_level
+                    )
+                    if len(returns):
+                        start = pair_start
+                        end = int(right_base + 1 + returns[0] + 1)
+                        rebound_peak = int(run_start + right_base)
+                        pattern = "downward_upward"
             lo, hi = int(run_start + start), int(run_start + end)
             mask[lo:hi] = True
             event = _event(lo, hi, fs_hz, "review_candidate", "abrupt_excursion")
@@ -413,12 +443,14 @@ def abrupt_excursion_candidates(values, fs_hz):
                 "downward_depth": depth,
                 "falling_slope_per_sec": falling_slope,
                 "preceding_upward_amplitude": upward_amplitude,
+                "rebound_peak_sample": rebound_peak,
                 "pattern_duration_sec": (end - start) / fs_hz,
                 "peak_sample": int(run_start + peak),
                 "amplitude": amplitude,
                 "amplitude_limit": float(amplitude_limit),
                 "max_slope_per_sec": slope,
                 "slope_limit_per_sec": float(slope_limit),
+                "upward_slope_limit_per_sec": float(upward_slope_limit),
                 "normalized_slope_per_sec": normalized_slope,
                 "duration_sec": float(properties["widths"][index] / fs_hz),
             }
@@ -651,9 +683,10 @@ def clean_recording(recording, config):
         "belt_morphology": dict(BELT_MORPHOLOGY),
         "abrupt_excursions": {
             **ABRUPT_EXCURSION,
-            "patterns": ["downward_with_recovery", "upward_downward"],
+            "patterns": ["downward_with_recovery", "upward_downward", "downward_upward"],
             "direction_basis": "source polarity before manual inversion",
             "recovery_policy": "trough below local median; both prominence bases reach that median",
+            "rebound_policy": "after a qualifying dip, group an overshoot above reference P90 and its median return within 6 s; no separate upward slope threshold",
         },
         "paired_gaussian_sigma_sec": 0.10,
         "paired_baseline_sec": 20,

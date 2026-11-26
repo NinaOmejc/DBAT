@@ -249,19 +249,28 @@ synchronization is unnecessary. These are conservative technical safeguards,
 not breath/sigh labels. Numeric evidence and parameters are saved in provenance.
 
 The existing `abrupt_excursion_candidates()` pass now flags only recovered
-**downward** and **upward-downward biphasic** excursions, after short-spike
+**downward**, **upward-downward** and **downward-upward** excursions, after short-spike
 correction. It uses a temporary 20 ms Gaussian estimate, local prominence in a
 10 s neighbourhood, and 90%-prominence widths of 0.25-6 s. Each side supplies at
 least 4 s of finite reference data, drawn from up to 15 s with a 0.5 s guard.
 Prominence must exceed both four scaled MADs and 1.5 times the reference P90-P10
-span; maximum slope must exceed both four times reference P95 absolute slope and
-six scaled MADs. Maximum slope/prominence must be at least 2.5/s.
+span. Downward excursions use review-only slope limits of 1.25 times reference
+P95 absolute slope and three scaled MADs. Maximum slope/prominence must still be
+at least 2.5/s. Only the downward slope thresholds are relaxed.
 
 To exclude isolated upward breaths/sighs, a candidate must also descend below the
 reference median, have an abrupt falling slope exceeding the local slope limit,
-and recover to the reference median at both prominence bases. A preceding upward lobe is labelled biphasic only if its
-height and rising slope exceed those same limits and the combined interval is
-at most 6 s. Direction refers to source polarity before manual belt inversion.
+and recover to the reference median at both prominence bases. A preceding upward
+lobe is labelled biphasic only if its height exceeds the existing amplitude limit,
+its rising slope exceeds the original stricter limits (four times P95 and six
+scaled MADs), and the combined interval is at most 6 s.
+
+A sharp downward leg is sufficient to trigger review. If its recovery overshoots
+the local reference P90, the upward rebound and its return to the reference median
+are included in **one downward-upward warning**, within the same 6 s limit.
+The rebound needs no independent upward slope test because the downward leg has
+already qualified. Isolated upward events retain the existing restrictions.
+Direction refers to source polarity before manual belt inversion.
 Genuine missing gaps split assessment. These are movement-like review heuristics,
 not physiological classifications. **This pass only produces orange advisory
 shading; it never interpolates, excludes samples, or changes validity.**
