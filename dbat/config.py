@@ -95,10 +95,133 @@ def validate_reference_config(reference):
         raise ValueError("reference.resp.raw_min_finite_fraction must be in [0, 1]")
 
 
+def validate_feature_config(settings):
+    """Validate Stage 5b selection and equations' numerical window settings."""
+    channels = settings["channels"]
+    if (
+        not isinstance(channels, list)
+        or any(not isinstance(c, str) for c in channels)
+        or len(set(channels)) != len(channels)
+        or not set(channels) <= set((*BELTS, "SpO2"))
+    ):
+        raise ValueError("features.channels supports only respiratory belts and SpO2")
+    names = settings["features"]
+    if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+        raise ValueError("features.features must list feature/family names")
+    for name in ("output_dir", "reference_dir"):
+        if not isinstance(settings[name], str) or not settings[name]:
+            raise ValueError(f"features.{name} must be a directory path")
+    if not isinstance(settings["analysis_intervals"], list):
+        raise ValueError(
+            "features.analysis_intervals must be a list of [start,end) pairs"
+        )
+    for interval in settings["analysis_intervals"]:
+        if (
+            not isinstance(interval, list)
+            or len(interval) != 2
+            or any(
+                isinstance(v, bool)
+                or not isinstance(v, (int, float))
+                or not math.isfinite(v)
+                for v in interval
+            )
+            or not 0 <= interval[0] < interval[1]
+        ):
+            raise ValueError(
+                "features.analysis_intervals must contain finite elapsed [start,end) seconds"
+            )
+    counts = {
+        "rr_min_ibi": 2,
+        "cov_min_ibi": 5,
+        "harmonic_min_ibi": 3,
+        "balance_min_breaths": 1,
+        "min_segments": 3,
+        "bandpass_order": 2,
+        "lowpass_order": 1,
+    }
+    fractions = {
+        "excursion_min_coverage",
+        "min_coverage",
+        "min_resultant_length",
+        "min_valid_fraction",
+    }
+    for group in (
+        "respiratory",
+        "spectral",
+        "eami",
+        "thoracoabdominal",
+        "phase",
+        "coherence",
+        "catch22",
+    ):
+        for name, value in settings[group].items():
+            if name == "band_hz":
+                if (
+                    not isinstance(value, list)
+                    or len(value) != 2
+                    or any(
+                        isinstance(v, bool)
+                        or not isinstance(v, (int, float))
+                        or not math.isfinite(v)
+                        for v in value
+                    )
+                    or not 0 < value[0] < value[1]
+                ):
+                    raise ValueError(
+                        f"features.{group}.band_hz must be finite increasing positive Hz"
+                    )
+            elif name in counts:
+                if type(value) is not int or value < counts[name]:
+                    raise ValueError(
+                        f"features.{group}.{name} must be an integer >= {counts[name]}"
+                    )
+            else:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                ):
+                    raise ValueError(f"Invalid features.{group}.{name}")
+                if name == "min_resultant_length":
+                    allowed = 0 <= value <= 1
+                elif name in fractions:
+                    allowed = 0 < value <= 1
+                elif name in {"frequency_tolerance_fraction", "min_magnitude_fraction"}:
+                    allowed = value >= 0
+                else:
+                    allowed = value > 0
+                if not allowed:
+                    raise ValueError(f"Invalid features.{group}.{name}")
+    if (
+        settings["phase"]["frequency_tolerance_fraction"] >= 1
+        or settings["eami"]["bandpass_order"] % 2
+    ):
+        raise ValueError(
+            "Phase frequency tolerance must be <1; eAMI bandpass order must be even"
+        )
+    if settings["eami"]["lowpass_hz"] >= settings["eami"]["sampling_hz"] / 2:
+        raise ValueError("eAMI lowpass must be below its analysis Nyquist")
+    if (
+        settings["catch22"]["min_segment_sec"] < 60
+        or settings["catch22"]["min_coverage"] < 0.8
+    ):
+        raise ValueError("Catch22 requires at least 60-s segments and 80% coverage")
+    for group, window, step in (
+        ("spectral", "window_sec", "step_sec"),
+        ("coherence", "segment_sec", "segment_step_sec"),
+        ("coherence", "window_sec", "step_sec"),
+    ):
+        if settings[group][step] > settings[group][window]:
+            raise ValueError(f"features.{group} step must not exceed its window")
+
+
 def _validate(config, directory):
     """Reject unsupported settings and inconsistent units before loading data."""
     _validate_selection(config["run"])
     validate_reference_config(config["reference"])
+    validate_feature_config(config["features"])
+    for name in ("output_dir", "reference_dir"):
+        config["features"][name] = _resolve_path(config["features"][name], directory)
     peaks = config["peak_detection"]
     if peaks["source"] not in {"matlab", "python"}:
         raise ValueError("peak_detection.source must be matlab or python")

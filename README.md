@@ -2,7 +2,7 @@
 
 A Python 3.11+ repository implementing **Phase 1 (stages 0–3)**: numeric
 `.dat` IO, initial manual technical QC, persistent annotations, and configurable
-conditioning, respiratory landmark review and Stage 5a static references. Only source code
+conditioning, respiratory landmark review and Stage 5a/5b references/features. Only source code
 and documentation belong in Git. Recording data and generated results stay local.
 Existing MAGMA repositories are read-only references.
 
@@ -20,14 +20,13 @@ D:\Experiments\DBAT\
     preproc_data\
     peak_detection\
     references\          # Separate immutable Stage 5a JSON revisions
-    features\            # Reserved for a later phase
+    features\            # Immutable Stage 5b per-recording runs
   venv\                  # Ignored by Git and excluded from PyCharm indexing
 ```
 
 `configs/default.toml` sets `paths.output_dir = "../outputs/preproc_data"`,
 resolved relative to the TOML directory. Existing result files remain unchanged;
-their provenance retains the paths used at the time they were produced. The empty
-`outputs/features` directory is local only; feature extraction remains unimplemented.
+their provenance retains the paths used at the time they were produced. `outputs/features` contains separate immutable Stage 5b runs, also local only.
 
 ## Package layout
 
@@ -55,7 +54,15 @@ dbat/
     respiratory.py
   features/
     __init__.py
-    reference.py
+    reference.py        # Existing Stage 5a calculation, unchanged
+    pipeline.py         # calculate_features() orchestration
+    catalog.py          # One feature/family registry
+    common.py           # Shared QC, intervals and result structure
+    respiratory.py      # Breath, local, envelope, spectrum and eAMI
+    thoracoabdominal.py # Balance, lognormal FFT phase and coherence
+    spo2.py
+    catch22.py
+    io.py               # Matching saved inputs and immutable outputs
 ```
 
 This standard flat layout places the `dbat` package directly in the repository.
@@ -224,6 +231,139 @@ and console verbosity without requiring the configured raw-data directory. The r
 `calculate_references(saved_data, reviewed_landmarks, reference)` calculates in
 memory without saving. MATLAB-imported and Python-detected reviewed revisions
 use the same implementation.
+
+## Stage 5b: common physiological features
+
+`from dbat.features import calculate_features` is the common entry point for
+future labeling and ML work. It consumes existing preprocessing, reviewed
+landmarks and `dbat_static_physiological_reference_v1` references. It never runs
+preprocessing, smoothing, detection or reference calculation. ECG, HRV and BP
+remain deferred; requesting their channels fails explicitly and their QC masks
+are never changed.
+
+```python
+import tomllib
+from dbat.features import calculate_features
+
+with open("configs/default.toml", "rb") as stream:
+    config = tomllib.load(stream)
+result = calculate_features(
+    preprocessing_h5,
+    landmarks=reviewed_landmarks_h5,
+    references=static_references_json,
+    channels=["Resp-Lungs", "Resp-Diaphragm"],
+    features=["ibi", "respiratory_rate", "amp_ratio", "catch22"],
+    config=config,
+)
+print(result["output_path"])
+```
+
+Paths are recommended; unchanged dictionaries returned by the existing readers
+are also accepted. In-memory inputs are checked against the source files named
+by reference provenance; moved inputs should be passed as explicit paths.
+A reference dictionary is fingerprinted using Stage 5a's exact JSON serialization.
+Identity, processed grid, current QC, reviewed waveform, preprocessing SHA-256,
+landmark SHA-256/schema/revision and the landmark's preprocessing dependency must
+agree. Stale or incompatible inputs raise before any feature output is published.
+Stage 5a's settings and availability remain authoritative; current reference
+configuration never causes recalculation or substitution.
+
+The registry in `features/catalog.py` supports individual names and the families
+`respiratory`, `thoracoabdominal`, `spo2` and `catch22`. `[features]` selects all
+four by default. `channels=None` and `features=None` use the configuration's
+selection; empty configuration lists select all supported entries. Dependencies
+are shared within each recording. Joint features require both belts to be
+selected; otherwise their omission is recorded. A QC-unavailable selected belt
+retains explicit missing results. Automatic warning masks remain advisory.
+
+| Group | Feature names | Resolution/default support |
+|---|---|---|
+| Breath | `ibi`, `respiratory_rate`, `amplitude`, `amp_ratio`, `global_amp_ratio`, `inspiratory_duration`, `expiratory_duration`, `ie_ratio` | Saved breath/inter-breath timing; no amplitude/IBI recomputation |
+| Local respiration | `local_respiratory_rate`, `ibi_cov`, `ibi_robust_cov`, `waveform_excursion`, `excursion_ratio` | Trailing 60-s RR (>=2 IBIs), 120-s CoV (>=5), 10-s excursion; 1-s step |
+| Envelope/eAMI | `envelope`, `envelope_cov`, `eami` | Hilbert samples per valid run, 60-s local envelope CV; 60-s centered eAMI at 5 Hz |
+| Spectral | `dominant_frequency`, `spectral_bandwidth`, `spectral_entropy`, `dominant_power_fraction`, `second_harmonic_power_fraction` | Complete 120-s Hann/Welch supports, 60-s step, 0.05–2 Hz |
+| Belt balance | `thoracic_amplitude_median`, `abdominal_amplitude_median`, `ta_ratio`, `ta_log_ratio`, `thoracic_fraction` | 30-s trailing medians, >=3 valid breaths per belt, 1-s step |
+| Belt phase | `phase_difference`, `absolute_phase_difference`, `phase_consistency` | Shared-frequency lognormal FFT wavelet; centered five-cycle circular means |
+| Coherence | `spectral_coherence` | Mean cross-/auto-spectra from >=3 valid 60-s/30-s segments; 180-s supports, 60-s step |
+| SpO2 | `oxygen_saturation`, `spo2_decrease` | Processed samples; decrease = static median minus observed percentage |
+| Catch22 | All 22 canonical names in `catalog.CATCH22_NAMES` | One duration-weighted descriptor per selected analysis interval/channel |
+
+All calculation windows and feature-specific settings live in `default.toml`.
+Sample SD (`ddof=1`) defines IBI CoV; robust CoV is
+`1.4826 * median(abs(IBI - median(IBI))) / median(IBI)`. Envelope CV retains
+MAGMA-ml's population SD/mean equation. `envelope_cov` is a configurable local
+trace rather than the old condensed interval statistic. I/E retains its
+`max(expiratory_duration, 0.1 s)`
+denominator. Local excursion and its existing static reference both use P95–P05
+with `method="hazen"`; at least three valid samples and 80% coverage are required
+for the local default. Rate/CoV and belt-balance windows cannot bridge QC gaps.
+Reference absence invalidates only reference-dependent ratios/decreases.
+
+Spectral bandwidth is the power-weighted frequency SD and spectral entropy is
+normalized by `log(number_of_bins)`. Power fractions integrate interpolated
+band edges within +/-0.03 Hz of the dominant peak or twice the median reviewed
+IBI fundamental (>=3 complete IBIs). Coherence averages spectra before dividing;
+segment count is saved because it affects estimator bias. Both phase and
+coherence operate on independent jointly eligible runs; no feature interpolation
+bridges gaps. Phase keeps MAGMA-ml's named `lognormal_fft_phase` alternative,
+including cubic run detrending and transform-edge exclusion. It is **not**
+claimed numerically identical to MATLAB `wtI`. `reliable` records the configured
+resultant-length criterion separately from the numerical phase descriptor.
+
+MAGMA-ml's belt median/IQR normalization (population-SD fallback) is reused for
+Hilbert envelopes and Catch22; SpO2 remains in percent. Normalization uses the
+full eligible recording even when extracting shorter scopes. eAMI uses MATLAB's
+`1 - 0.5 * log(energy_resp / energy_am)` equation, a 0.125–0.40-Hz Butterworth
+bandpass, rectification, 0.125-Hz lowpass and centered mean-removed energies.
+Only these feature-specific transforms/resampling are performed; the saved
+waveform is unchanged. SciPy SOS filtering/polyphase endpoints can differ from
+MATLAB. Existing DBAT `amp` definitions/validity are retained, including a selected
+non-symmetric method; MAGMA-ml's older symmetric-only recalculation is not migrated.
+Belt source units are recording-specific and are not calibrated tidal volume.
+
+Catch22 pins the approved `aeon==1.5.0` backend. Its numerical definitions match
+MAGMA-ml's 1.3.0 source (AST comparison); this change allows newer compatible
+NumPy/SciPy versions. It uses `catch24=False`, `outlier_norm=True`,
+`replace_nans=False`, `use_pycatch22=False`, `n_jobs=1`. Each contiguous valid
+segment must last >=60 s; those segments must cover >=80% of the selected
+interval. Undefined segment values are omitted independently per feature and
+remaining values are weighted by observed segment duration. No valid support
+means missing, including constant signals; gaps and recordings are never joined.
+Only the numerical transformer is invoked, not aeon's dataset loaders.
+Install the declared dependencies into the project environment with
+`.\venv\Scripts\python.exe -m pip install -e .`.
+
+`features.analysis_intervals=[]` means the full recording. Explicit elapsed
+half-open intervals such as `[[0.0, 180.0], [0.0, 300.0]]` enable subsequent
+3-/5-minute analyses without recalculating fixed references. Requested/actual
+bounds, truncation and interval membership are saved. Physiological observations
+retain their natural timestamps and complete support; unavailable observations
+remain missing. Catch22 clips valid runs to each requested interval before
+aggregation. No 230-column statistical summary or labels are produced.
+
+Run the saved-only batch using the existing `[run]` subjects/measurements/exclusions:
+
+```powershell
+.\venv\Scripts\python.exe scripts/calculate_features.py --config configs/default.toml
+# Or supply one exact triplet; configured raw-data paths need not exist:
+.\venv\Scripts\python.exe scripts/calculate_features.py --preprocessing FILE.h5 --landmarks FILE.h5 --references FILE.json
+```
+
+The batch selects the newest reference whose exact hash-linked preprocessing and
+landmark files exist under the configured roots; it never selects three unrelated
+newest revisions. Missing compatible input triplets fail explicitly. Existing
+inputs are opened read-only. Results are atomically published together as:
+
+```text
+outputs/features/SubN_MN/run0/features.h5
+outputs/features/SubN_MN/run0/summary.json
+```
+
+Each new invocation uses another immutable `runN`. HDF5 stores
+`features/<channel>/<name>/{values,time_sec,valid,support_start_sec,support_end_sec}`
+with coverage/count/interval-index datasets where applicable and `metadata_json`
+for units, methods and requirements. Root metadata and `summary.json` retain
+settings, all three input hashes/paths, reference settings and runtime versions.
 
 ## Development setup
 
@@ -936,10 +1076,10 @@ Stage 4 now has numerical respiratory detection; the remaining architecture
 branches between detection/review for new recordings and selective read-only import
 of reviewed historical MATLAB landmarks,
 then rejoins at **Stage 5a (implemented): static physiological references**.
-**Stage 5b (future): quality-aware feature extraction** consumes those fixed
+**Stage 5b (implemented): common physiological feature extraction** consumes those fixed
 recording-level references. Adaptive references, change points, early/late
-amplitude stability, rolling baselines and general feature extraction remain
-unimplemented. Stage 6 recomputes the
+amplitude stability and rolling baselines remain unimplemented. ECG/HRV/BP
+feature migration awaits established technical QC and dependencies. Stage 6 recomputes the
 11 automatic labels; stage 7 optionally reviews/imports immutable clinician rounds
 and explicit coverage (first historical target: `magma_ml_hdf5_v19`); stage 8 derives
 separate automatic/reviewed phenotype evidence. Stage 9 unsupervised analysis
@@ -947,6 +1087,6 @@ branches directly from Stage 5b; supervised work selects a stage-6/7 target.
 Future imports must validate identity/native-grid alignment, polarity, smoothing,
 and schema; convert one-based inclusive MATLAB ranges explicitly; preserve original
 review decisions/history and frozen phenotype snapshots; and treat artifact-invalid
-evidence as unknown, never a rewritten negative. Feature extraction, clinical
+evidence as unknown, never a rewritten negative. Clinical
 labeling, phenotyping, clustering, classification and legacy import remain later
 stages. Executable component checks live in the two stage checker scripts above.

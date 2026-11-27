@@ -127,3 +127,63 @@ spo2_min_valid_samples = 2
 
 [reference.resp]
 raw_min_finite_fraction = 0.80  # Finite, QC-valid processed samples / actual interval samples.
+
+# Stage 5b: common features from matching saved preprocessing/landmarks/references
+[features]
+channels = ["Resp-Lungs", "Resp-Diaphragm", "SpO2"]
+features = ["respiratory", "thoracoabdominal", "spo2", "catch22"]
+output_dir = "../outputs/features"
+reference_dir = "../outputs/references"
+analysis_intervals = []  # [] = full recording; otherwise elapsed [start, end) seconds, e.g. [[0.0, 180.0], [0.0, 300.0]].
+
+[features.respiratory]
+step_sec = 1.0
+rr_window_sec = 60.0
+rr_min_ibi = 2
+cov_window_sec = 120.0
+cov_min_ibi = 5
+excursion_window_sec = 10.0
+excursion_min_coverage = 0.80
+envelope_window_sec = 60.0
+
+[features.spectral]
+window_sec = 120.0
+step_sec = 60.0
+band_hz = [0.05, 2.0]
+peak_half_width_hz = 0.03
+harmonic_min_ibi = 3
+
+[features.eami]
+band_hz = [0.125, 0.40]
+bandpass_order = 12
+sampling_hz = 5.0
+lowpass_hz = 0.125
+lowpass_order = 6
+energy_window_sec = 60.0
+
+[features.thoracoabdominal]
+step_sec = 1.0
+balance_window_sec = 30.0
+balance_min_breaths = 3
+
+[features.phase]
+band_hz = [0.052, 0.60]
+f0 = 1.0
+frequency_tolerance_fraction = 0.30
+summary_cycles = 5.0
+edge_cycles = 1.0
+min_resultant_length = 0.80
+min_valid_fraction = 0.80
+min_magnitude_fraction = 0.05
+
+[features.coherence]
+segment_sec = 60.0
+segment_step_sec = 30.0
+window_sec = 180.0
+step_sec = 60.0
+min_segments = 3
+band_hz = [0.05, 0.60]
+
+[features.catch22]
+min_segment_sec = 60.0
+min_coverage = 0.80
