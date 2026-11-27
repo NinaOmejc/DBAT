@@ -115,3 +115,15 @@ source = "matlab"  # matlab loads saved landmarks; python detects on the final p
 matlab_results_dir = "D:/Projects/MAGMA/data_analysis/statistical_labeling"  # MATLAB cache root containing SubN_MN/SubN_MN_features.mat; used only for source=matlab.
 output_dir = "../outputs/peak_detection"  # Separate immutable HDF5 landmark revisions; preprocessing runs and qc.json are unchanged.
 window_sec = 600.0  # Initial peak-editor view in seconds (default 600); 0 shows the full recording.
+
+# Stage 5a: one static physiological reference per recording
+[reference]
+pre_start_min = 3.0  # M1/M3: pre-stress reference.
+pre_end_min = 6.0
+post_start_min = 19.0  # M2/M4: post-stress reference; only M2 may use its final three minutes.
+post_end_min = 22.0
+resp_min_breaths = 10
+spo2_min_valid_samples = 2
+
+[reference.resp]
+raw_min_finite_fraction = 0.80  # Finite, QC-valid processed samples / actual interval samples.

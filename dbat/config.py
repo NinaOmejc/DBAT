@@ -77,9 +77,28 @@ def _validate_selection(selection):
         raise ValueError("run.exclude_recordings contains duplicate pairs")
 
 
+def validate_reference_config(reference):
+    """Validate static-reference minute bounds, counts and processed-sample coverage."""
+    for phase in ("pre", "post"):
+        start, end = (reference[f"{phase}_{edge}_min"] for edge in ("start", "end"))
+        if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) for value in (start, end))
+                or not 0 <= start < end):
+            raise ValueError(f"reference.{phase} interval must have finite 0 <= start < end")
+    for name in ("resp_min_breaths", "spo2_min_valid_samples"):
+        value = reference[name]
+        if type(value) is not int or value < 1:
+            raise ValueError(f"reference.{name} must be a positive integer")
+    fraction = reference["resp"]["raw_min_finite_fraction"]
+    if (isinstance(fraction, bool) or not isinstance(fraction, (int, float))
+            or not math.isfinite(fraction) or not 0 <= fraction <= 1):
+        raise ValueError("reference.resp.raw_min_finite_fraction must be in [0, 1]")
+
+
 def _validate(config, directory):
     """Reject unsupported settings and inconsistent units before loading data."""
     _validate_selection(config["run"])
+    validate_reference_config(config["reference"])
     peaks = config["peak_detection"]
     if peaks["source"] not in {"matlab", "python"}:
         raise ValueError("peak_detection.source must be matlab or python")

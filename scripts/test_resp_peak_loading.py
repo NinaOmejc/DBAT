@@ -7,24 +7,42 @@ same peak/trough editor. Reviewed / Save writes a separate landmark revision;
 Cancel discards peak edits and continues to the next recording. Preprocessing
 has already saved its normal immutable run and is never changed by peak edits.
 MATLAB imports require the unchanged native sample grid (resample_freq=0).
+Successful review also saves separate Stage 5a static references. Recalculate
+from saved revisions without GUIs or raw data:
+python scripts/test_resp_peak_loading.py --preprocessing FILE.h5 --landmarks FILE.h5
 """
 
+import argparse
 import json
 from pathlib import Path
+import tomllib
 
 import numpy as np
 
 from dbat.config import load_config
+from dbat.features.reference import calculate_saved_references
 from dbat.io.recording import load_dat_recording, load_preprocessing_result, source_sha256
-from dbat.logging import logger
+from dbat.logging import configure_logging, logger
 from dbat.peak_detection import detect_preprocessed, load_matlab_peaks, run_peak_check_gui
 from dbat.preprocessing import run_preprocessing
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "default.toml"
 
 
-def main(config_path=CONFIG_PATH):
-    """Process configured recordings, verify saved arrays, then open the peak editor."""
+def main(config_path=CONFIG_PATH, *, preprocessing_path=None, landmark_path=None, reference_output_dir=None):
+    """Review configured recordings, or derive references from two saved revisions."""
+    if preprocessing_path is not None or landmark_path is not None:
+        if preprocessing_path is None or landmark_path is None:
+            raise ValueError("Supply both --preprocessing and --landmarks")
+        # Saved-only mode needs reference settings, not accessible raw input paths.
+        with Path(config_path).open("rb") as stream:
+            saved_config = tomllib.load(stream)
+        configure_logging(saved_config["run"]["verbosity"])
+        _, reference_path = calculate_saved_references(
+            preprocessing_path, landmark_path, saved_config["reference"], reference_output_dir,
+        )
+        logger.info("Saved static references: %s", reference_path)
+        return reference_path
     config = load_config(config_path)
     excluded = {tuple(pair) for pair in config["run"]["exclude_recordings"]}
     peaks_config = config["peak_detection"]
@@ -84,6 +102,10 @@ def main(config_path=CONFIG_PATH):
             )
             if accepted:
                 logger.info("Saved reviewed peaks: %s", peak_path)
+                _, reference_path = calculate_saved_references(
+                    path, peak_path, config["reference"], reference_output_dir,
+                )
+                logger.info("Saved static references: %s", reference_path)
             else:
                 logger.info(
                     "Peak review cancelled: %s; preprocessing run remains saved", recording.recording_id
@@ -91,4 +113,11 @@ def main(config_path=CONFIG_PATH):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--preprocessing", type=Path, help="Saved preprocessing HDF5 (no GUI)")
+    parser.add_argument("--landmarks", type=Path, help="Matching reviewed landmark HDF5 (no GUI)")
+    parser.add_argument("--reference-output-dir", type=Path, help="Override the separate references directory")
+    args = parser.parse_args()
+    main(args.config, preprocessing_path=args.preprocessing, landmark_path=args.landmarks,
+         reference_output_dir=args.reference_output_dir)

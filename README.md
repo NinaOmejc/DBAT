@@ -2,7 +2,7 @@
 
 A Python 3.11+ repository implementing **Phase 1 (stages 0–3)**: numeric
 `.dat` IO, initial manual technical QC, persistent annotations, and configurable
-conditioning, plus the numerical respiratory landmark stage. Only source code
+conditioning, respiratory landmark review and Stage 5a static references. Only source code
 and documentation belong in Git. Recording data and generated results stay local.
 Existing MAGMA repositories are read-only references.
 
@@ -18,6 +18,8 @@ D:\Experiments\DBAT\
   scripts\
   outputs\               # Ignored by Git and excluded from PyCharm indexing
     preproc_data\
+    peak_detection\
+    references\          # Separate immutable Stage 5a JSON revisions
     features\            # Reserved for a later phase
   venv\                  # Ignored by Git and excluded from PyCharm indexing
 ```
@@ -51,6 +53,9 @@ dbat/
   peak_detection/
     __init__.py
     respiratory.py
+  features/
+    __init__.py
+    reference.py
 ```
 
 This standard flat layout places the `dbat` package directly in the repository.
@@ -146,7 +151,8 @@ QC channels also reopens review. Save/Done confirms the whole recording.
 or closing the window discards unsaved peak edits; the previously saved
 preprocessing run and its `qc.json` stay unchanged. Edits retain source hashes,
 preprocessing/QC provenance, masks, original imported evidence, reviewer/time and
-manual edit history. Downstream outputs are marked stale; no extra analysis runs.
+manual edit history. After successful review, the script derives Stage 5a references
+from the saved preprocessing and landmark revisions. Cancel creates no references.
 
 `dbat.peak_detection.load_matlab_peaks(mat_path, preprocessed=None)` is the reusable
 loader for standard MATLAB `*_features.mat` files. It returns the same core
@@ -163,6 +169,61 @@ modified. `load_landmarks(path)` reads a saved DBAT landmark revision.
 The existing `check_peak_detection.py` verifies QC-invalid landmark exclusion,
 missing troughs/IBIs across invalid regions, unavailable channels, and that
 advisory warnings alone preserve landmarks.
+
+## Stage 5a: static physiological references
+
+`dbat/features/reference.py` calculates references once for each full recording.
+`[reference]` in `configs/default.toml` selects 3–6 minutes for M1/M3 and 19–22
+minutes for M2/M4. Requested and actual bounds, duration, availability,
+completeness, truncation and reason are stored. Bounds are zero-based and
+half-open; nonnegative sample positions use MATLAB rounding (`floor(x + 0.5)`).
+Recordings ending inside the interval truncate at their end. Only M2 ending at
+or before the requested start uses its final three minutes (or its whole duration
+if shorter). M1/M3/M4 never receive this fallback.
+
+Each belt independently supplies the median valid positive saved breath amplitude
+in the interval (at least `resp_min_breaths`, default 10), and a separate descriptive
+whole-recording median (at least one valid breath). Breaths are selected by peak
+time in `[start, end)`, using saved `amp` and `breath_valid`; landmarks and amplitudes
+are not recomputed. Waveform excursion is P95–P05 with NumPy `method="hazen"`,
+requiring at least three finite QC-valid samples and `raw_min_finite_fraction`
+coverage (default 0.80). SpO2 median and mean use the same interval and at least
+`spo2_min_valid_samples` (default 2). Every summary reports availability, quality,
+valid/input counts and valid fraction; sample coverage uses the actual truncated
+interval, and breath coverage uses all saved input peaks in its scope.
+
+Compared with MATLAB's raw waveform reference, DBAT deliberately uses only saved
+`preproc_signal`, `processed_fs_hz` and `processed_time_sec`, with no additional
+smoothing. Current preprocessing `valid`, `artifact` and `uncertain` masks and
+channel ratings control eligibility. Unavailable, weak or unassessed channels,
+unreviewed regions and confirmed artifacts supply no reference evidence.
+Automatic advisory candidates do not exclude evidence. Missing references remain
+`null`, including low-coverage waveform excursions; no global or adaptive value
+replaces them. Available truncated references carry a warning.
+
+The workflow writes `outputs/references/SubN_MN/SubN_MN_references_rNNNN.json`
+(a `references` sibling of the configured landmark output directory), using schema
+`dbat_static_physiological_reference_v1`. Each immutable revision stores effective
+reference settings, exact input paths/hashes, preprocessing schema, landmark
+schema/revision and review provenance. Input identity, waveform, QC and grids must
+match, and landmarks must name the exact saved preprocessing hash. Files may be
+moved if their contents remain identical. Preprocessing and landmark files are
+never changed. References for different revisions remain separate; future shorter
+feature windows should consume the chosen recording-level result.
+
+Calculate directly from matching saved revisions without raw data or GUIs:
+
+```powershell
+.\venv\Scripts\python.exe scripts/test_resp_peak_loading.py --preprocessing outputs/preproc_data/Sub1_M1/run0/Sub1_M1_preprocessing.h5 --landmarks outputs/peak_detection/Sub1_M1/Sub1_M1_landmarks_r0001.h5
+```
+
+Use `--config PATH` for other reference settings or `--reference-output-dir PATH`
+to choose the derived-result destination. Saved-only mode uses reference settings
+and console verbosity without requiring the configured raw-data directory. The reusable Python API is
+`calculate_saved_references(preprocessing_path, landmark_path, reference, output_dir=None)`;
+`calculate_references(saved_data, reviewed_landmarks, reference)` calculates in
+memory without saving. MATLAB-imported and Python-detected reviewed revisions
+use the same implementation.
 
 ## Development setup
 
@@ -874,11 +935,15 @@ not a native DBAT dependency. Library behavior references:
 Stage 4 now has numerical respiratory detection; the remaining architecture
 branches between detection/review for new recordings and selective read-only import
 of reviewed historical MATLAB landmarks,
-then rejoins at stage 5 for all common quality-aware features. Stage 6 recomputes the
+then rejoins at **Stage 5a (implemented): static physiological references**.
+**Stage 5b (future): quality-aware feature extraction** consumes those fixed
+recording-level references. Adaptive references, change points, early/late
+amplitude stability, rolling baselines and general feature extraction remain
+unimplemented. Stage 6 recomputes the
 11 automatic labels; stage 7 optionally reviews/imports immutable clinician rounds
 and explicit coverage (first historical target: `magma_ml_hdf5_v19`); stage 8 derives
 separate automatic/reviewed phenotype evidence. Stage 9 unsupervised analysis
-branches directly from stage 5; supervised work selects a stage-6/7 target.
+branches directly from Stage 5b; supervised work selects a stage-6/7 target.
 Future imports must validate identity/native-grid alignment, polarity, smoothing,
 and schema; convert one-based inclusive MATLAB ranges explicitly; preserve original
 review decisions/history and frozen phenotype snapshots; and treat artifact-invalid
